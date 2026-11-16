@@ -50,7 +50,7 @@ PorryAgent 是从零构建的生产级 CodingAgent，Python 3.11+，用 uv 管�
 1. **可观测与成本**：结构化日志 + 每请求/每压缩 trace + 成本按 run 累计可量化；provider 声明能力，不支持的走降级、不假装。
 2. **密钥与配置**：密钥只从 env 读取，日志与异常脱敏，缺配置给「缺哪个变量、怎么设」的提示而非堆栈。
 
-补充：四个存量模块（CC-Context、ContextManagerModel、Eval、MultiAgent）是参考实现，按模块参考设计思想。
+补充：五个存量模块（CC-Context、ContextManagerModel、Eval、GoalKeep、MultiAgent）是参考实现，按模块参考设计思想。
 
 ## 四、权威与落地
 
