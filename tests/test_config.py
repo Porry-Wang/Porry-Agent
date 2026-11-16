@@ -1,0 +1,42 @@
+import pytest
+
+from porry_agent.config import ConfigError, load_settings
+
+
+def test_defaults():
+    s = load_settings()
+    assert s.provider == "mock"
+    assert s.model == "mock"
+    assert s.max_turns == 50
+    assert s.log_level == "INFO"
+
+
+def test_env_override(monkeypatch):
+    monkeypatch.setenv("PORRY_AGENT_MAX_TURNS", "3")
+    assert load_settings().max_turns == 3
+
+
+def test_env_file_loaded(tmp_path):
+    (tmp_path / ".env").write_text("PORRY_AGENT_MODEL=deepseek-chat\n", encoding="utf-8")
+    assert load_settings().model == "deepseek-chat"
+
+
+def test_invalid_value_raises():
+    with pytest.raises(ConfigError, match="PORRY_AGENT_MAX_TURNS"):
+        load_settings(max_turns=0)
+
+
+def test_unknown_init_kwarg_raises():
+    with pytest.raises(ConfigError):
+        load_settings(bogus=1)
+
+
+def test_env_file_unknown_key_raises(tmp_path):
+    (tmp_path / ".env").write_text("PORRY_AGENT_BOGUS=1\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_api_key_masked_in_dump():
+    s = load_settings(api_key="sk-secret")
+    assert s.model_dump(mode="json")["api_key"] == "**********"
