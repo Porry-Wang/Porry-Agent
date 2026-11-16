@@ -1,0 +1,36 @@
+# 密钥：只提交模板
+.env
+.env.*
+!.env.example
+
+# 虚拟环境与构建产物
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 测试与覆盖率
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Agent 运行产物
+runs/
+.transcripts/
+*.jsonl
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+
+# 开发期知识库：不随仓库发布，开源时只挂原文链接
+docs/reference/
