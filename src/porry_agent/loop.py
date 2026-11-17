@@ -25,11 +25,15 @@ def run_loop(
     user_input: str,
     *,
     max_turns: int,
+    system: Optional[str] = None,
     execute_tool: Optional[Callable[[ToolCall], str]] = None,
 ) -> LoopResult:
     if max_turns < 1:
         raise LoopError("max_turns 必须大于 0。")
-    messages = [Message(role="user", content=user_input)]
+    messages: list[Message] = []
+    if system:
+        messages.append(Message(role="system", content=system))
+    messages.append(Message(role="user", content=user_input))
     for turn in range(1, max_turns + 1):
         reply = provider.complete(messages)
         messages.append(reply)

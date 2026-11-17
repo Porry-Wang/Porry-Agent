@@ -31,8 +31,15 @@ class Settings(BaseSettings):
     # 运行上限
     max_turns: int = Field(default=50, gt=0)
 
+    # 路径
+    workspace_root: Optional[Path] = None
+
     # 日志
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    @property
+    def resolved_workspace_root(self) -> Path:
+        return (self.workspace_root or Path.cwd()).expanduser().resolve()
 
 
 def load_settings(**overrides: object) -> Settings:
