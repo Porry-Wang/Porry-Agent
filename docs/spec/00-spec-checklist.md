@@ -54,4 +54,4 @@ PorryAgent 是从零构建的生产级 CodingAgent，Python 3.11+，用 uv 管�
 
 ## 四、权威与落地
 
-- 历史决策与原文存档见 `docs/reference/`
+- 历史决策见 `docs/decisions.md`，理念原文存档见 `docs/reference/`
