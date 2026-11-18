@@ -1,8 +1,11 @@
+import json
+
 import pytest
 
 from porry_agent.messages import Message, ToolCall
 from porry_agent.provider import MockProvider
 from porry_agent.loop import LoopError, run_loop
+from porry_agent.tools import build_default_registry, make_executor, render_system_prompt
 
 
 class LoopingProvider:
@@ -13,6 +16,26 @@ class LoopingProvider:
             role="assistant",
             tool_calls=[ToolCall(id="c1", name="noop")],
         )
+
+
+class ScriptedProvider:
+    """按剧本走三步：读文件 → 改文件 → 汇报完成。"""
+
+    def __init__(self) -> None:
+        self.step = 0
+
+    def complete(self, messages: list[Message]) -> Message:
+        self.step += 1
+        if self.step == 1:
+            return Message(role="assistant", tool_calls=[ToolCall(
+                id="c1", name="read_file",
+                arguments=json.dumps({"path": "a.txt"}))])
+        if self.step == 2:
+            return Message(role="assistant", tool_calls=[ToolCall(
+                id="c2", name="edit_file",
+                arguments=json.dumps({
+                    "path": "a.txt", "old_string": "world", "new_string": "there"}))])
+        return Message(role="assistant", content="done")
 
 
 def test_single_turn_completes():
@@ -43,3 +66,22 @@ def test_tool_calls_without_executor_raises():
 def test_invalid_max_turns_raises():
     with pytest.raises(LoopError):
         run_loop(MockProvider(), "x", max_turns=0)
+
+
+def test_end_to_end_file_edit(tmp_path):
+    (tmp_path / "a.txt").write_text("hello\nworld\n", encoding="utf-8")
+    registry = build_default_registry(tmp_path)
+
+    result = run_loop(
+        ScriptedProvider(), "把 world 改成 there", max_turns=5,
+        system=render_system_prompt(registry),
+        execute_tool=make_executor(registry))
+
+    assert result.stop_reason == "completed"
+    assert result.turns == 3
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hello\nthere\n"
+    assert result.messages[0].role == "system"
+    tool_msgs = [m for m in result.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
+    assert "hello" in tool_msgs[0].content
+    assert "已编辑" in tool_msgs[1].content

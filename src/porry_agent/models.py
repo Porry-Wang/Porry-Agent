@@ -61,6 +61,7 @@ def load_models(path: Optional[Path] = None) -> dict[str, ModelSpec]:
 
 
 def resolve_model(name: str, models: dict[str, ModelSpec]) -> ModelSpec:
+    """按名字查模型事实，未注册则报错并列出已知模型。"""
     spec = models.get(name)
     if spec is None:
         known = ", ".join(sorted(models))

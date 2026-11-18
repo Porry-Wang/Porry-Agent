@@ -28,6 +28,7 @@ def run_loop(
     system: Optional[str] = None,
     execute_tool: Optional[Callable[[ToolCall], str]] = None,
 ) -> LoopResult:
+    """跑 think→act→observe 循环，模型不再请求工具即完成，max_turns 兜底。"""
     if max_turns < 1:
         raise LoopError("max_turns 必须大于 0。")
     messages: list[Message] = []
