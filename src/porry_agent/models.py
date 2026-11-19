@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 class ModelSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    context_window: int = Field(gt=0)
-    max_output_tokens: int = Field(gt=0)
+    # 可选：缺省表示未知，填了必须为正
+    context_window: Optional[int] = Field(default=None, gt=0)
+    max_output_tokens: Optional[int] = Field(default=None, gt=0)
     # 连接覆盖：留空则用全局兜底；api_key_env 只存环境变量名，不存明文密钥
     protocol: Optional[Literal["mock", "openai"]] = None
     base_url: Optional[str] = None
@@ -27,9 +28,14 @@ DEFAULT_MODELS: dict[str, ModelSpec] = {
         context_window=128_000, max_output_tokens=16_384,
         protocol="openai", base_url="https://api.openai.com/v1", api_key_env="OPENAI_API_KEY",
     ),
-    "deepseek-chat": ModelSpec(
-        context_window=64_000, max_output_tokens=8_000,
-        protocol="openai", base_url="https://api.deepseek.com/v1", api_key_env="DEEPSEEK_API_KEY",
+    "deepseek-flash": ModelSpec(
+        context_window=1_000_000, max_output_tokens=393_216,
+        protocol="openai", base_url="https://api.deepseek.com", api_key_env="DEEPSEEK_API_KEY",
+    ),
+    "qwen3.8-flash": ModelSpec(
+        context_window=1_000_000, max_output_tokens=131_072,
+        protocol="openai", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key_env="DASHSCOPE_API_KEY",
     ),
 }
 

@@ -9,7 +9,8 @@ from porry_agent.models import (
 
 def test_builtin_table():
     models = load_models()
-    assert {"mock", "gpt-4o-mini", "deepseek-chat"} <= set(models)
+    assert {"mock", "gpt-4o-mini", "deepseek-flash", "qwen3.8-flash"} <= set(models)
+    assert "deepseek-chat" not in models
     assert models["mock"].context_window == 200_000
 
 
@@ -29,6 +30,19 @@ def test_toml_adds_model(tmp_path):
     spec = load_models(p)["qwen-plus"]
     assert spec.context_window == 131072
     assert spec.api_key_env == "DASHSCOPE_API_KEY"
+
+
+def test_toml_connection_only(tmp_path):
+    p = tmp_path / "models.toml"
+    p.write_text(
+        '[my-relay]\nprotocol = "openai"\nbase_url = "https://api.openlux.ai/v1"\n'
+        'api_key_env = "OPENLUX_API_KEY"\n',
+        encoding="utf-8",
+    )
+    spec = load_models(p)["my-relay"]
+    assert spec.context_window is None
+    assert spec.max_output_tokens is None
+    assert spec.base_url == "https://api.openlux.ai/v1"
 
 
 def test_toml_overrides_builtin(tmp_path):

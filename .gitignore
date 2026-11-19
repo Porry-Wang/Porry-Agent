@@ -34,3 +34,6 @@ runs/
 
 # 开发期知识库：不随仓库发布，开源时只挂原文链接
 docs/reference/
+
+# 模型配置文件
+models.toml

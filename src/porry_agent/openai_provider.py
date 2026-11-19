@@ -45,7 +45,11 @@ def resolve_connection(
         key = env.get(spec.api_key_env)
         if not key or not key.strip():
             raise ProviderError(
-                f"模型 '{model_name}' 需要密钥：设置环境变量 {spec.api_key_env}。")
+                f"模型 '{model_name}' 需要密钥：设置环境变量 {spec.api_key_env}。"
+                f"环境变量只对设置后启动的进程生效：可在当前终端直接设置"
+                f"（macOS/Linux：export {spec.api_key_env}=值；"
+                f"PowerShell：$env:{spec.api_key_env}='值'），"
+                f"或写入配置文件/系统设置后新开终端。")
     else:
         key = fallback_api_key
         if not key or not key.strip():
@@ -108,17 +112,24 @@ class OpenAIProvider:
     """对接任意 OpenAI 兼容端点；换厂商只换 base_url 和模型名。"""
 
     def __init__(self, *, model: str, base_url: str, api_key: str,
-                 max_output_tokens: int, tool_specs: Optional[list[ToolSpec]] = None,
+                 max_output_tokens: Optional[int] = None,
+                 tool_specs: Optional[list[ToolSpec]] = None,
                  transport: Optional[httpx.BaseTransport] = None) -> None:
         self._model = model
         self._max_output_tokens = max_output_tokens
         self._tools = [_tool_to_wire(s) for s in tool_specs or []]
-        self._client = httpx.Client(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            transport=transport,
-            follow_redirects=True)
+        try:
+            self._client = httpx.Client(
+                base_url=base_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                transport=transport,
+                follow_redirects=True)
+        except httpx.InvalidURL as exc:
+            raise ProviderError(
+                f"HTTP 客户端初始化失败：{exc}。"
+                f"常见原因是代理环境变量含非法条目（如 NO_PROXY 里的 [::1]），"
+                f"请清空 NO_PROXY 与 no_proxy 后重试。") from None
 
     def close(self) -> None:
         self._client.close()
@@ -134,8 +145,9 @@ class OpenAIProvider:
         payload: dict = {
             "model": self._model,
             "messages": [_to_wire(m) for m in messages],
-            "max_tokens": self._max_output_tokens,
         }
+        if self._max_output_tokens is not None:
+            payload["max_tokens"] = self._max_output_tokens
         if self._tools:
             payload["tools"] = self._tools
 

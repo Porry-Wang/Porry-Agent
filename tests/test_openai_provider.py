@@ -20,7 +20,7 @@ TOOL_REPLY = {"choices": [{"message": {
 
 
 def make_provider(handler, **overrides) -> OpenAIProvider:
-    kwargs = dict(model="deepseek-chat", base_url="https://api.deepseek.com/v1",
+    kwargs = dict(model="deepseek-flash", base_url="https://api.deepseek.com/v1",
                   api_key="sk-test", max_output_tokens=1024)
     kwargs.update(overrides)
     return OpenAIProvider(transport=httpx.MockTransport(handler), **kwargs)
@@ -68,7 +68,7 @@ def test_request_shape():
     assert seen["url"] == "https://api.deepseek.com/v1/chat/completions"
     assert seen["auth"] == "Bearer sk-test"
     payload = seen["payload"]
-    assert payload["model"] == "deepseek-chat"
+    assert payload["model"] == "deepseek-flash"
     assert payload["max_tokens"] == 1024
     assert payload["tools"] == [{"type": "function",
                                  "function": {"name": "read_file", "description": "读",
@@ -188,7 +188,7 @@ def test_factory_mock(tmp_path):
 
 def test_factory_openai(tmp_path, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    settings = load_settings(model="deepseek-chat")
+    settings = load_settings(model="deepseek-flash")
     provider = build_provider(settings, load_models(), build_default_registry(tmp_path))
     assert isinstance(provider, OpenAIProvider)
 
@@ -250,3 +250,28 @@ def test_length_finish_reason_raises():
     with pytest.raises(ProviderError, match="截断"):
         make_provider(handler).complete([Message(role="user", content="hi")])
     assert calls["n"] == 1
+
+
+def test_no_max_tokens_when_unset():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=TEXT_REPLY)
+
+    provider = make_provider(handler, max_output_tokens=None)
+    provider.complete([Message(role="user", content="hi")])
+    assert "max_tokens" not in seen["payload"]
+
+
+def test_missing_key_error_mentions_new_terminal():
+    spec = ModelSpec(api_key_env="MY_KEY")
+    with pytest.raises(ProviderError, match="新开终端"):
+        resolve_connection("m", spec, fallback_base_url="https://x.com/v1",
+                           fallback_api_key=None, env={})
+
+
+def test_invalid_proxy_env_raises_provider_error(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "[::1]")
+    with pytest.raises(ProviderError, match="NO_PROXY"):
+        OpenAIProvider(model="m", base_url="https://x.com/v1", api_key="sk-test")
