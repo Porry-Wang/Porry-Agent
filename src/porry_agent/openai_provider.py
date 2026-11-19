@@ -1,17 +1,14 @@
-"""OpenAI 兼容适配器：连接解析、请求/响应转换、错误分类与重试。"""
+"""OpenAI 兼容适配器：请求/响应转换、错误分类与重试。"""
 
 from __future__ import annotations
 
 import json
-import os
 import time
-from typing import Mapping, Optional
-from urllib.parse import urlparse
+from typing import Optional
 
 import httpx
 
 from porry_agent.messages import Message, ToolCall
-from porry_agent.models import ModelSpec
 from porry_agent.tools import ToolSpec
 
 REQUEST_TIMEOUT_SECONDS = 60.0
@@ -21,42 +18,6 @@ RETRY_BACKOFF_SECONDS = 1.0
 
 class ProviderError(Exception):
     """模型请求或连接配置错误。"""
-
-
-def resolve_connection(
-    model_name: str,
-    spec: ModelSpec,
-    *,
-    fallback_base_url: str,
-    fallback_api_key: Optional[str],
-    env: Optional[Mapping[str, str]] = None,
-) -> tuple[str, str]:
-    """按「模型覆盖 > 全局兜底」解析 base_url 与密钥；密钥只从 env 读。"""
-    env = os.environ if env is None else env
-
-    base_url = spec.base_url or fallback_base_url
-    parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ProviderError(
-            f"模型 '{model_name}' 的 base_url 非法：{base_url!r}，"
-            f"需要 http(s):// 开头的完整地址。")
-
-    if spec.api_key_env:
-        key = env.get(spec.api_key_env)
-        if not key or not key.strip():
-            raise ProviderError(
-                f"模型 '{model_name}' 需要密钥：设置环境变量 {spec.api_key_env}。"
-                f"环境变量只对设置后启动的进程生效：可在当前终端直接设置"
-                f"（macOS/Linux：export {spec.api_key_env}=值；"
-                f"PowerShell：$env:{spec.api_key_env}='值'），"
-                f"或写入配置文件/系统设置后新开终端。")
-    else:
-        key = fallback_api_key
-        if not key or not key.strip():
-            raise ProviderError(
-                f"模型 '{model_name}' 需要密钥：在 MODELS_FILE 给它配 api_key_env，"
-                f"或设置 PORRY_AGENT_API_KEY。")
-    return base_url, key
 
 
 def _tool_to_wire(spec: ToolSpec) -> dict:
@@ -92,8 +53,8 @@ def _parse_reply(response: httpx.Response) -> Message:
         result = response.json()["choices"][0]
         if result.get("finish_reason") == "length":
             raise ProviderError(
-                "回复被 max_tokens 截断（finish_reason=length），"
-                "请调大该模型的 max_output_tokens。")
+                "回复被截断（finish_reason=length）：输出达到 max_tokens 上限，"
+                "可让模型分步输出或缩小单次任务。")
         choice = result["message"]
         tool_calls = []
         for tc in choice.get("tool_calls") or []:

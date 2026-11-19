@@ -4,12 +4,9 @@ import httpx
 import pytest
 
 from porry_agent import openai_provider
-from porry_agent.config import load_settings
 from porry_agent.messages import Message, ToolCall
-from porry_agent.models import ModelSpec, load_models
-from porry_agent.openai_provider import OpenAIProvider, ProviderError, resolve_connection
-from porry_agent.provider import MockProvider, build_provider
-from porry_agent.tools import ToolResult, ToolSpec, build_default_registry
+from porry_agent.openai_provider import OpenAIProvider, ProviderError
+from porry_agent.tools import ToolResult, ToolSpec
 
 TEXT_REPLY = {"choices": [{"message": {"role": "assistant", "content": "你好"}}]}
 TOOL_REPLY = {"choices": [{"message": {
@@ -78,46 +75,6 @@ def test_request_shape():
     assert wire[3] == {"role": "tool", "content": "hello", "tool_call_id": "c1"}
 
 
-def test_resolve_missing_env_key():
-    spec = ModelSpec(context_window=1000, max_output_tokens=100, api_key_env="MY_KEY")
-    with pytest.raises(ProviderError, match="MY_KEY"):
-        resolve_connection("m", spec, fallback_base_url="https://x.com/v1",
-                           fallback_api_key="sk-fallback", env={})
-
-
-def test_resolve_model_overrides_fallback():
-    spec = ModelSpec(context_window=1000, max_output_tokens=100,
-                     base_url="https://api.deepseek.com/v1", api_key_env="MY_KEY")
-    base_url, key = resolve_connection(
-        "m", spec, fallback_base_url="https://api.openai.com/v1",
-        fallback_api_key="sk-fallback", env={"MY_KEY": "sk-model"})
-    assert base_url == "https://api.deepseek.com/v1"
-    assert key == "sk-model"
-
-
-def test_resolve_fallback_when_spec_empty():
-    spec = ModelSpec(context_window=1000, max_output_tokens=100)
-    base_url, key = resolve_connection(
-        "m", spec, fallback_base_url="https://api.openai.com/v1",
-        fallback_api_key="sk-fallback", env={})
-    assert base_url == "https://api.openai.com/v1"
-    assert key == "sk-fallback"
-
-
-def test_resolve_missing_all_keys():
-    spec = ModelSpec(context_window=1000, max_output_tokens=100)
-    with pytest.raises(ProviderError, match="PORRY_AGENT_API_KEY"):
-        resolve_connection("m", spec, fallback_base_url="https://x.com/v1",
-                           fallback_api_key=None, env={})
-
-
-def test_resolve_invalid_base_url():
-    spec = ModelSpec(context_window=1000, max_output_tokens=100)
-    with pytest.raises(ProviderError, match="base_url"):
-        resolve_connection("m", spec, fallback_base_url="not-a-url",
-                           fallback_api_key="sk", env={})
-
-
 def test_retry_on_429_then_success(monkeypatch):
     monkeypatch.setattr(openai_provider, "RETRY_BACKOFF_SECONDS", 0)
     calls = {"n": 0}
@@ -178,19 +135,6 @@ def test_malformed_response():
         lambda request: httpx.Response(200, json={"unexpected": True}))
     with pytest.raises(ProviderError, match="格式"):
         provider.complete([Message(role="user", content="hi")])
-
-
-def test_factory_mock(tmp_path):
-    settings = load_settings()
-    provider = build_provider(settings, load_models(), build_default_registry(tmp_path))
-    assert isinstance(provider, MockProvider)
-
-
-def test_factory_openai(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    settings = load_settings(model="deepseek-flash")
-    provider = build_provider(settings, load_models(), build_default_registry(tmp_path))
-    assert isinstance(provider, OpenAIProvider)
 
 
 def test_follows_redirect():
@@ -262,13 +206,6 @@ def test_no_max_tokens_when_unset():
     provider = make_provider(handler, max_output_tokens=None)
     provider.complete([Message(role="user", content="hi")])
     assert "max_tokens" not in seen["payload"]
-
-
-def test_missing_key_error_mentions_new_terminal():
-    spec = ModelSpec(api_key_env="MY_KEY")
-    with pytest.raises(ProviderError, match="新开终端"):
-        resolve_connection("m", spec, fallback_base_url="https://x.com/v1",
-                           fallback_api_key=None, env={})
 
 
 def test_invalid_proxy_env_raises_provider_error(monkeypatch):

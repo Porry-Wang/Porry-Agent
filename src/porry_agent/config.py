@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PREFIX = "PORRY_AGENT_"
@@ -21,12 +21,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8", extra="forbid",
     )
 
-    # 模型接入：全局兜底，注册表里的模型条目可覆盖
-    provider: Literal["mock", "openai"] = "mock"
-    base_url: str = "https://api.openai.com/v1"
-    api_key: Optional[SecretStr] = None
+    # 模型接入：模型名可带「厂商:」前缀；不带前缀时用默认厂商
     model: str = "mock"
-    models_file: Optional[Path] = None
+    vendor: Optional[str] = None
 
     # 运行上限
     max_turns: int = Field(default=50, gt=0)
@@ -43,12 +40,15 @@ class Settings(BaseSettings):
 
 
 def load_settings(**overrides: object) -> Settings:
-    """加载配置，失败抛 ConfigError。"""
+    """加载配置，失败抛 ConfigError；报错按来源归因（命令行参数或环境变量）。"""
     try:
         return Settings(**overrides)  # type: ignore[arg-type]
     except ValidationError as exc:
         lines: list[str] = []
         for err in exc.errors():
             field = "_".join(str(p) for p in err["loc"])
-            lines.append(f"{ENV_PREFIX}{field.upper()} 取值不合法：{err['msg']}")
+            if field in overrides:
+                lines.append(f"命令行参数 {field} 取值不合法：{err['msg']}")
+            else:
+                lines.append(f"{ENV_PREFIX}{field.upper()} 取值不合法：{err['msg']}")
         raise ConfigError("配置有误：\n" + "\n".join(lines)) from None

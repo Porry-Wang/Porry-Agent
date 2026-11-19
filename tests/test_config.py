@@ -5,7 +5,6 @@ from porry_agent.config import ConfigError, load_settings
 
 def test_defaults():
     s = load_settings()
-    assert s.provider == "mock"
     assert s.model == "mock"
     assert s.max_turns == 50
     assert s.log_level == "INFO"
@@ -22,8 +21,14 @@ def test_env_file_loaded(tmp_path):
 
 
 def test_invalid_value_raises():
-    with pytest.raises(ConfigError, match="PORRY_AGENT_MAX_TURNS"):
+    with pytest.raises(ConfigError, match="命令行参数 max_turns"):
         load_settings(max_turns=0)
+
+
+def test_env_invalid_value_mentions_env_var(monkeypatch):
+    monkeypatch.setenv("PORRY_AGENT_MAX_TURNS", "0")
+    with pytest.raises(ConfigError, match="PORRY_AGENT_MAX_TURNS"):
+        load_settings()
 
 
 def test_unknown_init_kwarg_raises():
@@ -35,8 +40,3 @@ def test_env_file_unknown_key_raises(tmp_path):
     (tmp_path / ".env").write_text("PORRY_AGENT_BOGUS=1\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_settings()
-
-
-def test_api_key_masked_in_dump():
-    s = load_settings(api_key="sk-secret")
-    assert s.model_dump(mode="json")["api_key"] == "**********"
