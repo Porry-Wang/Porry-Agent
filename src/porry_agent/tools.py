@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from pydantic import BaseModel
 
@@ -18,7 +18,7 @@ class ToolResult(BaseModel):
 
     ok: bool
     content: str
-    error_type: Optional[str] = None
+    error_type: str | None = None
     retryable: bool = False
 
 
@@ -39,6 +39,7 @@ class ToolSpec(BaseModel):
     parameters: dict
     handler: Callable[[dict], ToolResult]
     read_only: bool = False
+
 
 def _resolve_in(root: Path, raw: object) -> Path:
     """把相对路径解析成工作目录内的绝对路径，参数非法或越界抛 ToolError。"""
@@ -98,34 +99,51 @@ def build_default_registry(workspace_root: Path) -> dict[str, ToolSpec]:
                 pos = text.find(old, pos + len(old))
             raise ToolError(
                 "multiple_matches",
-                f"old_string 匹配 {count} 处（行 {', '.join(lines)}），请加长上下文使其唯一。")
+                f"old_string 匹配 {count} 处（行 {', '.join(lines)}），请加长上下文使其唯一。",
+            )
         updated = text.replace(old, new, 1)
         _atomic_write(path, updated)
         if path.read_text(encoding="utf-8") != updated:
             _atomic_write(path, text)
             raise ToolError("io_error", "写后校验失败，已回滚原内容。", retryable=True)
-        return ToolResult(ok=True, content=f"已编辑 {path.relative_to(root)}，替换 1 处。")
+        return ToolResult(
+            ok=True, content=f"已编辑 {path.relative_to(root)}，替换 1 处。"
+        )
 
     return {
         "read_file": ToolSpec(
-            name="read_file", description="读取工作目录内的文本文件",
-            parameters={"type": "object", "properties": {
-                "path": {"type": "string", "description": "相对工作目录的文件路径"}},
-                "required": ["path"]},
-            handler=read_file, read_only=True),
+            name="read_file",
+            description="读取工作目录内的文本文件",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "相对工作目录的文件路径"}
+                },
+                "required": ["path"],
+            },
+            handler=read_file,
+            read_only=True,
+        ),
         "edit_file": ToolSpec(
-            name="edit_file", description="把文件中唯一匹配的 old_string 替换为 new_string",
-            parameters={"type": "object", "properties": {
-                "path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"}},
-                "required": ["path", "old_string", "new_string"]},
-            handler=edit_file),
+            name="edit_file",
+            description="把文件中唯一匹配的 old_string 替换为 new_string",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+            handler=edit_file,
+        ),
     }
 
 
 def make_executor(registry: dict[str, ToolSpec]) -> Callable[[ToolCall], str]:
     """把注册表包装成主循环的执行回调：查工具、解析参数、执行，失败一律转成错误文本。"""
+
     def execute(call: ToolCall) -> str:
         """执行单个工具调用，任何失败都转成错误文本，不向主循环抛异常。"""
         spec = registry.get(call.name)
@@ -140,13 +158,20 @@ def make_executor(registry: dict[str, ToolSpec]) -> Callable[[ToolCall], str]:
         try:
             result = spec.handler(args)
         except ToolError as exc:
-            result = ToolResult(ok=False, content=str(exc),
-                                error_type=exc.error_type, retryable=exc.retryable)
+            result = ToolResult(
+                ok=False,
+                content=str(exc),
+                error_type=exc.error_type,
+                retryable=exc.retryable,
+            )
         except Exception as exc:
-            result = ToolResult(ok=False, content=f"工具执行异常：{exc}", error_type="tool_error")
+            result = ToolResult(
+                ok=False, content=f"工具执行异常：{exc}", error_type="tool_error"
+            )
         if result.ok:
             return result.content
         return f"[工具错误 {result.error_type}] {result.content}"
+
     return execute
 
 
@@ -154,7 +179,9 @@ def render_system_prompt(registry: dict[str, ToolSpec]) -> str:
     """把注册表渲染成 system prompt：工具清单、参数 schema 与编辑规矩。"""
     lines = ["你是编程助手，通过工具操作文件。可用工具："]
     for spec in registry.values():
-        lines.append(f"- {spec.name}：{spec.description}。"
-                     f"参数 schema：{json.dumps(spec.parameters, ensure_ascii=False)}")
+        lines.append(
+            f"- {spec.name}：{spec.description}。"
+            f"参数 schema：{json.dumps(spec.parameters, ensure_ascii=False)}"
+        )
     lines.append("编辑前必须先 read_file；old_string 必须唯一匹配；路径相对工作目录。")
     return "\n".join(lines)

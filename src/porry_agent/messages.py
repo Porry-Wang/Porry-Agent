@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,4 +17,4 @@ class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
     content: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
-    tool_call_id: Optional[str] = None
+    tool_call_id: str | None = None
