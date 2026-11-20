@@ -72,3 +72,20 @@ def test_bare_name_without_vendor_fails(capsys):
 def test_empty_cli_model_rejected(capsys):
     assert main(["--model", "", "你好"]) == 1
     assert "启动失败" in capsys.readouterr().err
+
+
+def test_no_task_enters_repl(monkeypatch, capsys):
+    inputs = iter(["你好", "exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+    assert main([]) == 0
+    out = capsys.readouterr()
+    assert "mock: 你好" in out.out
+    assert "[done] turns=1 stop=completed" in out.out
+
+
+def test_task_arg_one_shot_does_not_read_stdin(monkeypatch, capsys):
+    def fail_input(_prompt=""):
+        raise AssertionError("一次性模式不应读 stdin")
+    monkeypatch.setattr("builtins.input", fail_input)
+    assert main(["你好"]) == 0
+    assert "mock: 你好" in capsys.readouterr().out

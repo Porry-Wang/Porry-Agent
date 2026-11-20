@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Literal, Optional
+from collections.abc import Callable
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -25,15 +26,19 @@ def run_loop(
     user_input: str,
     *,
     max_turns: int,
-    system: Optional[str] = None,
-    execute_tool: Optional[Callable[[ToolCall], str]] = None,
+    system: str | None = None,
+    execute_tool: Callable[[ToolCall], str] | None = None,
+    history: list[Message] | None = None,
 ) -> LoopResult:
     """跑 think→act→observe 循环，模型不再请求工具即完成，max_turns 兜底。"""
     if max_turns < 1:
         raise LoopError("max_turns 必须大于 0。")
-    messages: list[Message] = []
-    if system:
-        messages.append(Message(role="system", content=system))
+    if history:
+        messages: list[Message] = list(history)
+    else:
+        messages = []
+        if system:
+            messages.append(Message(role="system", content=system))
     messages.append(Message(role="user", content=user_input))
     for turn in range(1, max_turns + 1):
         reply = provider.complete(messages)
@@ -43,6 +48,7 @@ def run_loop(
         if execute_tool is None:
             raise LoopError("模型请求了工具调用，但没有接入工具执行器。")
         for call in reply.tool_calls:
-            messages.append(Message(
-                role="tool", content=execute_tool(call), tool_call_id=call.id))
+            messages.append(
+                Message(role="tool", content=execute_tool(call), tool_call_id=call.id)
+            )
     return LoopResult(messages=messages, turns=max_turns, stop_reason="max_turns")

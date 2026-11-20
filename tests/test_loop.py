@@ -85,3 +85,28 @@ def test_end_to_end_file_edit(tmp_path):
     assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
     assert "hello" in tool_msgs[0].content
     assert "已编辑" in tool_msgs[1].content
+
+
+def test_history_continues_across_calls():
+    first = run_loop(MockProvider(), "第一问", max_turns=5, system="s")
+    second = run_loop(MockProvider(), "第二问", max_turns=5,
+                      system="s", history=first.messages)
+    contents = [m.content for m in second.messages]
+    assert "第一问" in contents and "mock: 第一问" in contents
+    assert second.messages[-1].content == "mock: 第二问"
+    assert sum(m.role == "system" for m in second.messages) == 1
+
+
+def test_history_ignores_system_param():
+    first = run_loop(MockProvider(), "一", max_turns=5, system="原系统")
+    second = run_loop(MockProvider(), "二", max_turns=5,
+                      system="新系统", history=first.messages)
+    assert second.messages[0].content == "原系统"
+    assert "新系统" not in [m.content for m in second.messages]
+
+
+def test_history_not_mutated():
+    first = run_loop(MockProvider(), "一", max_turns=5)
+    snapshot = list(first.messages)
+    run_loop(MockProvider(), "二", max_turns=5, history=first.messages)
+    assert first.messages == snapshot
