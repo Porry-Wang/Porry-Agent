@@ -20,6 +20,14 @@ def test_env_file_loaded(tmp_path):
     assert load_settings().model == "deepseek-chat"
 
 
+def test_env_file_found_from_subdirectory(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("PORRY_AGENT_MODEL=deepseek-chat\n", encoding="utf-8")
+    sub = tmp_path / "src" / "pkg"
+    sub.mkdir(parents=True)
+    monkeypatch.chdir(sub)
+    assert load_settings().model == "deepseek-chat"
+
+
 def test_invalid_value_raises():
     with pytest.raises(ConfigError, match="命令行参数 max_turns"):
         load_settings(max_turns=0)

@@ -88,10 +88,10 @@ def test_missing_key_fails(tmp_path, monkeypatch):
         build_provider(settings, build_default_registry(tmp_path))
 
 
-def test_missing_key_mentions_new_terminal(tmp_path, monkeypatch):
+def test_missing_key_mentions_restart(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENLUX_API_KEY", raising=False)
     settings = load_settings(model="openlux:m")
-    with pytest.raises(ProviderError, match="新开终端"):
+    with pytest.raises(ProviderError, match="重新启动"):
         build_provider(settings, build_default_registry(tmp_path))
 
 
