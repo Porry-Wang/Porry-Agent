@@ -5,7 +5,7 @@ import pytest
 from porry_agent.messages import ToolCall
 from porry_agent.tools import (
     ToolSpec,
-    build_default_registry,
+    build_default_tools,
     make_executor,
     render_system_prompt,
 )
@@ -19,7 +19,7 @@ def workspace(tmp_path):
 
 @pytest.fixture()
 def executor(workspace):
-    return make_executor(build_default_registry(workspace))
+    return make_executor(build_default_tools(workspace))
 
 
 def call(executor, name, **args):
@@ -81,18 +81,18 @@ def test_bad_arguments(executor):
 
 
 def test_handler_exception_becomes_observation(workspace):
-    registry = build_default_registry(workspace)
+    tools = build_default_tools(workspace)
 
     def boom(args):
         raise RuntimeError("炸了")
 
-    registry["boom"] = ToolSpec(name="boom", description="", parameters={}, handler=boom)
-    out = make_executor(registry)(ToolCall(id="t1", name="boom", arguments="{}"))
+    tools["boom"] = ToolSpec(name="boom", description="", parameters={}, handler=boom)
+    out = make_executor(tools)(ToolCall(id="t1", name="boom", arguments="{}"))
     assert "tool_error" in out
     assert "炸了" in out
 
 
 def test_system_prompt_lists_tools(workspace):
-    prompt = render_system_prompt(build_default_registry(workspace))
+    prompt = render_system_prompt(build_default_tools(workspace))
     assert "read_file" in prompt
     assert "edit_file" in prompt

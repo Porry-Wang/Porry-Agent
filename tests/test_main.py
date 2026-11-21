@@ -31,7 +31,7 @@ def test_env_file_model_and_vendor(tmp_path, monkeypatch, capsys):
         "PORRY_AGENT_MODEL=qwen3.8-flash\nPORRY_AGENT_VENDOR=openlux\n",
         encoding="utf-8")
     monkeypatch.setattr("porry_agent.__main__.build_provider",
-                        lambda settings, registry: MockProvider())
+                        lambda settings, tools: MockProvider())
     assert main(["你好"]) == 0
     out = capsys.readouterr()
     assert "模型：qwen3.8-flash" in out.out
@@ -49,7 +49,7 @@ def test_env_file_explicit_mock_no_warning(tmp_path, capsys):
 
 def test_prefix_selection_startup_line(monkeypatch, capsys):
     monkeypatch.setattr("porry_agent.__main__.build_provider",
-                        lambda settings, registry: MockProvider())
+                        lambda settings, tools: MockProvider())
     assert main(["--model", "dashscope:qwen3.8-flash", "你好"]) == 0
     out = capsys.readouterr()
     assert "模型：dashscope:qwen3.8-flash" in out.out

@@ -54,7 +54,7 @@ VENDORS: dict[str, Vendor] = {
 }
 
 
-def build_provider(settings: Settings, registry: dict[str, ToolSpec]) -> Provider:
+def build_provider(settings: Settings, tools: dict[str, ToolSpec]) -> Provider:
     """按「厂商:模型名」选择组装 mock 或 OpenAI 兼容适配器；模型名原样发给厂商。"""
     if settings.model == "mock":
         return MockProvider()
@@ -83,5 +83,5 @@ def build_provider(settings: Settings, registry: dict[str, ToolSpec]) -> Provide
         model=model_name,
         base_url=vendor.base_url,
         api_key=key,
-        tool_specs=list(registry.values()),
+        tool_specs=list(tools.values()),
     )

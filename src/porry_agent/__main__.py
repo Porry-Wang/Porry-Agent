@@ -13,7 +13,7 @@ from porry_agent.openai_provider import ProviderError
 from porry_agent.provider import MockProvider, build_provider
 from porry_agent.repl import run_repl
 from porry_agent.tools import (
-    build_default_registry,
+    build_default_tools,
     make_executor,
     render_system_prompt,
 )
@@ -41,8 +41,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {"model": args.model} if args.model is not None else {}
         settings = load_settings(**overrides)
         setup_logging(settings.log_level)
-        registry = build_default_registry(settings.resolved_workspace_root)
-        provider = build_provider(settings, registry)
+        tools = build_default_tools(settings.resolved_workspace_root)
+        provider = build_provider(settings, tools)
     except (ConfigError, ProviderError) as exc:
         print(f"启动失败：{exc}", file=sys.stderr)
         if settings is not None:
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    executor = make_executor(registry)
+    executor = make_executor(tools)
 
     def traced(call: ToolCall) -> str:
         print(f"[tool] {call.name} {call.arguments}")
@@ -79,13 +79,13 @@ def main(argv: list[str] | None = None) -> int:
                 provider,
                 traced,
                 max_turns=settings.max_turns,
-                system=render_system_prompt(registry),
+                system=render_system_prompt(tools),
             )
         result = run_loop(
             provider,
             args.task,
             max_turns=settings.max_turns,
-            system=render_system_prompt(registry),
+            system=render_system_prompt(tools),
             execute_tool=traced,
         )
     except (ProviderError, LoopError) as exc:

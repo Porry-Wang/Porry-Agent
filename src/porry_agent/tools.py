@@ -1,4 +1,4 @@
-"""工具层：契约、注册表、首批文件工具与循环执行器。"""
+"""工具层：契约、默认工具集、文件工具与循环执行器。"""
 
 from __future__ import annotations
 
@@ -63,8 +63,8 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def build_default_registry(workspace_root: Path) -> dict[str, ToolSpec]:
-    """造默认工具注册表（read_file / edit_file），先读后写的账本随每套注册表独立。"""
+def build_default_tools(workspace_root: Path) -> dict[str, ToolSpec]:
+    """构造默认工具集（read_file / edit_file）；handler 绑定工作目录，先读后写账本每套独立。"""
     root = workspace_root.resolve()
     read_paths: set[Path] = set()
 
@@ -141,12 +141,12 @@ def build_default_registry(workspace_root: Path) -> dict[str, ToolSpec]:
     }
 
 
-def make_executor(registry: dict[str, ToolSpec]) -> Callable[[ToolCall], str]:
-    """把注册表包装成主循环的执行回调：查工具、解析参数、执行，失败一律转成错误文本。"""
+def make_executor(tools: dict[str, ToolSpec]) -> Callable[[ToolCall], str]:
+    """把工具集包装成主循环的执行回调：查工具、解析参数、执行，失败一律转成错误文本。"""
 
     def execute(call: ToolCall) -> str:
         """执行单个工具调用，任何失败都转成错误文本，不向主循环抛异常。"""
-        spec = registry.get(call.name)
+        spec = tools.get(call.name)
         if spec is None:
             return f"[工具错误 unknown_tool] 未知工具：{call.name}"
         try:
@@ -175,10 +175,10 @@ def make_executor(registry: dict[str, ToolSpec]) -> Callable[[ToolCall], str]:
     return execute
 
 
-def render_system_prompt(registry: dict[str, ToolSpec]) -> str:
-    """把注册表渲染成 system prompt：工具清单、参数 schema 与编辑规矩。"""
+def render_system_prompt(tools: dict[str, ToolSpec]) -> str:
+    """把工具集渲染成 system prompt：工具清单、参数 schema 与编辑规矩。"""
     lines = ["你是编程助手，通过工具操作文件。可用工具："]
-    for spec in registry.values():
+    for spec in tools.values():
         lines.append(
             f"- {spec.name}：{spec.description}。"
             f"参数 schema：{json.dumps(spec.parameters, ensure_ascii=False)}"

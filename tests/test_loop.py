@@ -5,7 +5,7 @@ import pytest
 from porry_agent.messages import Message, ToolCall
 from porry_agent.provider import MockProvider
 from porry_agent.loop import LoopError, run_loop
-from porry_agent.tools import build_default_registry, make_executor, render_system_prompt
+from porry_agent.tools import build_default_tools, make_executor, render_system_prompt
 
 
 class LoopingProvider:
@@ -70,12 +70,12 @@ def test_invalid_max_turns_raises():
 
 def test_end_to_end_file_edit(tmp_path):
     (tmp_path / "a.txt").write_text("hello\nworld\n", encoding="utf-8")
-    registry = build_default_registry(tmp_path)
+    tools = build_default_tools(tmp_path)
 
     result = run_loop(
         ScriptedProvider(), "把 world 改成 there", max_turns=5,
-        system=render_system_prompt(registry),
-        execute_tool=make_executor(registry))
+        system=render_system_prompt(tools),
+        execute_tool=make_executor(tools))
 
     assert result.stop_reason == "completed"
     assert result.turns == 3
