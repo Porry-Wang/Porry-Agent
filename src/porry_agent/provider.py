@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -16,6 +17,10 @@ from porry_agent.tools import ToolSpec
 class Provider(Protocol):
     def complete(self, messages: list[Message]) -> Message: ...
 
+    def stream_complete(
+        self, messages: list[Message], *, on_text: Callable[[str], None]
+    ) -> Message: ...
+
 
 class MockProvider:
     """离线确定性回复：回声最近一条用户消息。"""
@@ -25,6 +30,14 @@ class MockProvider:
             (m.content for m in reversed(messages) if m.role == "user"), ""
         )
         return Message(role="assistant", content=f"mock: {last_user}")
+
+    def stream_complete(
+        self, messages: list[Message], *, on_text: Callable[[str], None]
+    ) -> Message:
+        """退化流式：整段一次当一个碎片吐出。"""
+        reply = self.complete(messages)
+        on_text(reply.content)
+        return reply
 
 
 class Vendor(BaseModel):

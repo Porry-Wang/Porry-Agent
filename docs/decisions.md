@@ -365,3 +365,23 @@
 理由：薄封装与当初被删的 resolve_connection 同味，规则应在消费方旁边一处读完。报错的职责是定位问题，教程归 README；根因提示（环境变量只对设置后启动的进程生效）压缩为「设置后重新启动程序生效」保留，这是 zshrc 未 source 高频坑的关键机制，不能删。空模型名检查前移到厂商解析之前，裸空名报「模型名为空」而非「未指定厂商」，归因更准。
 
 被否方案：保留五行平台教程（冗长淹没诊断，本条反转 11-18「说人话」的报错扩写方向，机制提示保留）；保留 _split_selection 独立函数（薄封装）；开发者指引留在报错里（用户报错不该教改代码）。
+
+## 2026-11-20 流式输出：on_text 回调缝，首字前才重试，REPL 收尾去重
+
+背景：REPL 等整段回复生成完才显示，长任务用户面对空白屏幕；流式的消费方随 REPL（#14）出现，交互阶段第二批开工。
+
+决定：分三层。streaming.py 纯逻辑：parse_sse_data 逐行解析（空行/注释/[DONE] 返回 None），StreamAssembler 累积 content 碎片并返回新增文本，tool_calls 按 index 静默拼装，finish_reason 只记录不抛错。openai_provider.stream_complete 发同一请求带 stream:true，新文本实时交 on_text，拼完返回完整 Message；首个文本碎片吐出前的连接错误按既有退避重试，吐出后断流直接抛 ProviderError 不重试；非 200/截断/坏 JSON 与非流式同一套分类，截断文案共用常量。run_loop 加可选 on_text：非空且 provider 有 stream_complete 走流式，否则走 complete（MockProvider 自动回落）；一次性模式不传回调，stdout 契约不变。REPL 回调逐字打印（end=""、flush=True），streamed 标记决定收尾：流过只补换行不重打全文，半截失败也先补换行再报错。
+
+理由：回调缝让 Provider Protocol 不动，Mock 与既有测试替身零改动；两条路径返回值都是 Message，历史结构一致，循环的工具执行与判停逻辑零改动。重试边界划在「用户是否已看到文本」：吐出后重试会重复打印半截话，宁可本轮失败（REPL 单轮失败不结束会话已兜底）。截断抛错放 provider 层，避免 streaming 反向 import ProviderError 成环；坏 JSON 透传 JSONDecodeError 由 provider 统一包装，纯逻辑层不自造异常。
+
+被否方案：Provider Protocol 加流式方法（Mock 与全部测试替身被迫跟进）；yield 事件流（调用方自行拼装，缝变复杂）；断流后也重试（重复输出）；一次性模式同样流式（无消费方价值，退出码+stdout 契约优先）；REPL 结尾重打全文（与逐字打印重复）。
+
+## 2026-11-20 流式缝显式化：stream_complete 进 Protocol（反转同日流式 ADR 的 getattr 探测条款）
+
+背景：流式 ADR 决定 Provider Protocol 不动、run_loop 用 getattr 探测 stream_complete 回落 complete。实际代价随即显现：调用点无法被搜索（getattr 里的方法名是字符串），「支持不支持」从接口期降级到运行期，静态阅读失效。
+
+决定：Provider Protocol 同时声明 complete 与 stream_complete；MockProvider 与 RecordingProvider 给退化实现（调 complete，整段当一个碎片交 on_text）；run_loop 删 getattr，on_text 非空即直调 provider.stream_complete。「回落」概念删除。
+
+理由：能力可选把分支成本转嫁给每个消费方；接口齐备后消费方只判断「调用方要不要流式」，不再判断「provider 支不支持」。退化实现比探测分支便宜：三行方法让替身成为接口完整公民，业界同款是 LangChain BaseChatModel 的 invoke/stream 双声明加基类默认适配。LoopingProvider 等只走 complete 路径的替身因结构化类型不受影响，不强制补方法。
+
+被否方案：保留 getattr 探测（调用点不可见，本轮反转的对象）；独立 StreamProvider Protocol + isinstance runtime_checkable（仍是运行期判断，且替身被迫类型化）；共享 FakeProvider 基类（核磁盘后仅 RecordingProvider 一处需要，建基类是过度抽象）。

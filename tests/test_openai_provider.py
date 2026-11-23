@@ -212,3 +212,105 @@ def test_invalid_proxy_env_raises_provider_error(monkeypatch):
     monkeypatch.setenv("NO_PROXY", "[::1]")
     with pytest.raises(ProviderError, match="NO_PROXY"):
         OpenAIProvider(model="m", base_url="https://x.com/v1", api_key="sk-test")
+
+
+def _sse_chunk(content=None, tool_calls=None, finish=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+    return {"choices": [{"delta": delta, "finish_reason": finish}]}
+
+
+def _sse_response(chunks):
+    lines = [f"data: {json.dumps(c, ensure_ascii=False)}" for c in chunks]
+    lines.append("data: [DONE]")
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+    return httpx.Response(200, content=iter([body]))
+
+
+def test_stream_content_and_callback():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return _sse_response([
+            _sse_chunk(content="你"),
+            _sse_chunk(content="好", finish="stop"),
+        ])
+
+    fragments = []
+    reply = make_provider(handler).stream_complete(
+        [Message(role="user", content="hi")], on_text=fragments.append)
+    assert seen["payload"]["stream"] is True
+    assert fragments == ["你", "好"]
+    assert reply.content == "你好"
+    assert reply.tool_calls == []
+
+
+def test_stream_tool_calls_silent():
+    chunks = [
+        _sse_chunk(tool_calls=[{"index": 0, "id": "c1",
+                                "function": {"name": "read_file",
+                                             "arguments": '{"pa'}}]),
+        _sse_chunk(tool_calls=[{"index": 0,
+                                "function": {"arguments": 'th": "a.txt"}'}}]),
+        _sse_chunk(finish="tool_calls"),
+    ]
+    fragments = []
+    reply = make_provider(lambda request: _sse_response(chunks)).stream_complete(
+        [Message(role="user", content="读")], on_text=fragments.append)
+    assert fragments == []
+    assert reply.tool_calls[0].arguments == '{"path": "a.txt"}'
+
+
+def test_stream_truncation_raises():
+    provider = make_provider(lambda request: _sse_response([
+        _sse_chunk(content="半句话", finish="length")]))
+    with pytest.raises(ProviderError, match="截断"):
+        provider.stream_complete(
+            [Message(role="user", content="hi")], on_text=lambda t: None)
+
+
+def test_stream_break_after_text_no_retry():
+    calls = {"n": 0}
+
+    def broken_body():
+        yield 'data: {"choices":[{"delta":{"content":"你"}}]}\n'.encode("utf-8")
+        raise httpx.ReadError("peer closed connection")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, content=broken_body())
+
+    fragments = []
+    with pytest.raises(ProviderError, match="中断"):
+        make_provider(handler).stream_complete(
+            [Message(role="user", content="hi")], on_text=fragments.append)
+    assert fragments == ["你"]
+    assert calls["n"] == 1
+
+
+def test_stream_connect_error_retries(monkeypatch):
+    monkeypatch.setattr(openai_provider, "RETRY_BACKOFF_SECONDS", 0)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection refused")
+        return _sse_response([_sse_chunk(content="你好", finish="stop")])
+
+    reply = make_provider(handler).stream_complete(
+        [Message(role="user", content="hi")], on_text=lambda t: None)
+    assert reply.content == "你好"
+    assert calls["n"] == 2
+
+
+def test_stream_invalid_json_raises():
+    provider = make_provider(
+        lambda request: httpx.Response(200, content=iter([b"data: {broken\n"])))
+    with pytest.raises(ProviderError, match="JSON"):
+        provider.stream_complete(
+            [Message(role="user", content="hi")], on_text=lambda t: None)

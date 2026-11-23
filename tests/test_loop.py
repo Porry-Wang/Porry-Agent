@@ -110,3 +110,47 @@ def test_history_not_mutated():
     snapshot = list(first.messages)
     run_loop(MockProvider(), "二", max_turns=5, history=first.messages)
     assert first.messages == snapshot
+
+
+class StreamingProvider:
+    """流式剧本：把「你好」拆两片回调；complete 置毒，走了就炸。"""
+
+    def stream_complete(self, messages, *, on_text):
+        on_text("你")
+        on_text("好")
+        return Message(role="assistant", content="你好")
+
+    def complete(self, messages):
+        raise AssertionError("不应走非流式路径")
+
+
+class DualProvider:
+    """两条路径都在：complete 正常，stream_complete 置毒。"""
+
+    def complete(self, messages):
+        return Message(role="assistant", content="走 complete")
+
+    def stream_complete(self, messages, *, on_text):
+        raise AssertionError("不应走流式路径")
+
+
+def test_on_text_uses_stream():
+    fragments = []
+    result = run_loop(StreamingProvider(), "hi", max_turns=5,
+                      on_text=fragments.append)
+    assert fragments == ["你", "好"]
+    assert result.stop_reason == "completed"
+    assert result.messages[-1].content == "你好"
+
+
+def test_mock_streams_single_fragment():
+    fragments = []
+    result = run_loop(MockProvider(), "hi", max_turns=5,
+                      on_text=fragments.append)
+    assert fragments == ["mock: hi"]
+    assert result.messages[-1].content == "mock: hi"
+
+
+def test_no_on_text_uses_complete():
+    result = run_loop(DualProvider(), "hi", max_turns=5)
+    assert result.messages[-1].content == "走 complete"

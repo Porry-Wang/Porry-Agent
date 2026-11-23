@@ -29,8 +29,13 @@ def run_loop(
     system: str | None = None,
     execute_tool: Callable[[ToolCall], str] | None = None,
     history: list[Message] | None = None,
+    on_text: Callable[[str], None] | None = None,
 ) -> LoopResult:
-    """跑 think→act→observe 循环，模型不再请求工具即完成，max_turns 兜底。"""
+    """跑 think→act→observe 循环，模型不再请求工具即完成，max_turns 兜底。
+
+    on_text 非空走流式，文本碎片实时回调；否则走 complete。
+    两条路径产出的历史结构一致。
+    """
     if max_turns < 1:
         raise LoopError("max_turns 必须大于 0。")
     if history:
@@ -41,7 +46,10 @@ def run_loop(
             messages.append(Message(role="system", content=system))
     messages.append(Message(role="user", content=user_input))
     for turn in range(1, max_turns + 1):
-        reply = provider.complete(messages)
+        if on_text is not None:
+            reply = provider.stream_complete(messages, on_text=on_text)
+        else:
+            reply = provider.complete(messages)
         messages.append(reply)
         if not reply.tool_calls:
             return LoopResult(messages=messages, turns=turn, stop_reason="completed")

@@ -18,7 +18,10 @@ def run_repl(
     max_turns: int,
     system: str | None = None,
 ) -> int:
-    """读输入 → 跑一轮 → 打印回复；exit/quit/EOF/Ctrl-C 退出，单轮失败不结束会话。"""
+    """读输入 → 跑一轮 → 打印回复；exit/quit/EOF/Ctrl-C 退出，单轮失败不结束会话。
+
+    流式回复随到随打；结尾只补换行，不重打全文。
+    """
     history: list[Message] = []
     while True:
         try:
@@ -30,6 +33,13 @@ def run_repl(
             continue
         if text.lower() in {"exit", "quit"}:
             return 0
+        streamed = False
+
+        def on_text(fragment: str) -> None:
+            nonlocal streamed
+            streamed = True
+            print(fragment, end="", flush=True)
+
         try:
             result = run_loop(
                 provider,
@@ -38,13 +48,19 @@ def run_repl(
                 system=system,
                 execute_tool=execute_tool,
                 history=history,
+                on_text=on_text,
             )
         except KeyboardInterrupt:
             print()
             return 0
         except (ProviderError, LoopError) as exc:
+            if streamed:
+                print()
             print(f"本轮失败：{exc}", file=sys.stderr)
             continue
         history = result.messages
+        if streamed:
+            print()
         print(f"[done] turns={result.turns} stop={result.stop_reason}")
-        print(result.messages[-1].content)
+        if not streamed:
+            print(result.messages[-1].content)

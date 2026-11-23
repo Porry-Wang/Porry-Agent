@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 
 import httpx
 
 from porry_agent.messages import Message, ToolCall
+from porry_agent.streaming import StreamAssembler, parse_sse_data
 from porry_agent.tools import ToolSpec
 
 REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 1.0
+
+_TRUNCATED_MESSAGE = (
+    "回复被截断（finish_reason=length）：输出达到 max_tokens 上限，"
+    "可让模型分步输出或缩小单次任务。"
+)
 
 
 class ProviderError(Exception):
@@ -60,10 +67,7 @@ def _parse_reply(response: httpx.Response) -> Message:
     try:
         result = response.json()["choices"][0]
         if result.get("finish_reason") == "length":
-            raise ProviderError(
-                "回复被截断（finish_reason=length）：输出达到 max_tokens 上限，"
-                "可让模型分步输出或缩小单次任务。"
-            )
+            raise ProviderError(_TRUNCATED_MESSAGE)
         choice = result["message"]
         tool_calls = []
         for tc in choice.get("tool_calls") or []:
@@ -120,8 +124,7 @@ class OpenAIProvider:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
-    def complete(self, messages: list[Message]) -> Message:
-        """发一轮请求拿下一条回复；瞬时错误退避重试，永久错误与截断抛 ProviderError。"""
+    def _payload(self, messages: list[Message]) -> dict:
         payload: dict = {
             "model": self._model,
             "messages": [_to_wire(m) for m in messages],
@@ -130,6 +133,11 @@ class OpenAIProvider:
             payload["max_tokens"] = self._max_output_tokens
         if self._tools:
             payload["tools"] = self._tools
+        return payload
+
+    def complete(self, messages: list[Message]) -> Message:
+        """发一轮请求拿下一条回复；瞬时错误退避重试，永久错误与截断抛 ProviderError。"""
+        payload = self._payload(messages)
 
         last_error = ""
         for attempt in range(MAX_RETRIES + 1):
@@ -148,6 +156,59 @@ class OpenAIProvider:
                     raise ProviderError(
                         f"请求失败 HTTP {response.status_code}：{_error_detail(response)}"
                     )
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * (2**attempt))
+        raise ProviderError(f"重试 {MAX_RETRIES} 次后仍失败，最后错误：{last_error}")
+
+    def stream_complete(
+        self, messages: list[Message], *, on_text: Callable[[str], None]
+    ) -> Message:
+        """流式拿一条回复：content 碎片实时交给 on_text，拼完返回完整 Message。
+
+        首个文本碎片吐出前按瞬时错误重试；已吐出后断流直接抛错，不重试。
+        """
+        payload = self._payload(messages)
+        payload["stream"] = True
+        last_error = ""
+        for attempt in range(MAX_RETRIES + 1):
+            emitted = False
+            assembler = StreamAssembler()
+            try:
+                with self._client.stream(
+                    "POST", "/chat/completions", json=payload
+                ) as response:
+                    if response.status_code != 200:
+                        response.read()
+                        if response.status_code == 429 or response.status_code >= 500:
+                            last_error = (
+                                f"HTTP {response.status_code}："
+                                f"{_error_detail(response)}"
+                            )
+                        else:
+                            raise ProviderError(
+                                f"请求失败 HTTP {response.status_code}："
+                                f"{_error_detail(response)}"
+                            )
+                    else:
+                        for line in response.iter_lines():
+                            chunk = parse_sse_data(line)
+                            if chunk is None:
+                                continue
+                            text = assembler.feed(chunk)
+                            if text:
+                                emitted = True
+                                on_text(text)
+                        if assembler.finish_reason == "length":
+                            raise ProviderError(_TRUNCATED_MESSAGE)
+                        return assembler.finish()
+            except httpx.TransportError as exc:
+                if emitted:
+                    raise ProviderError(
+                        f"流式回复中断：{exc}。已输出内容无法续传，请重发本轮。"
+                    ) from None
+                last_error = f"网络错误：{exc}"
+            except json.JSONDecodeError:
+                raise ProviderError("流式数据不是合法 JSON，无法解析。") from None
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (2**attempt))
         raise ProviderError(f"重试 {MAX_RETRIES} 次后仍失败，最后错误：{last_error}")
