@@ -89,3 +89,16 @@ def test_task_arg_one_shot_does_not_read_stdin(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", fail_input)
     assert main(["你好"]) == 0
     assert "mock: 你好" in capsys.readouterr().out
+
+
+def test_one_shot_closes_provider(monkeypatch):
+    closed = []
+
+    class ClosingMock(MockProvider):
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr("porry_agent.__main__.build_provider",
+                        lambda settings, tools: ClosingMock())
+    assert main(["你好"]) == 0
+    assert closed == [True]

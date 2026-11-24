@@ -22,7 +22,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """配置根日志器：JSON 行输出到 stderr。"""
+    """配置根日志器：JSON 行输出到 stderr；httpx2 请求日志压到 WARNING，DEBUG 时跟随。"""
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
@@ -31,3 +31,6 @@ def setup_logging(level: str = "INFO") -> None:
         old.close()
     root.addHandler(handler)
     root.setLevel(level)
+    logging.getLogger("httpx2").setLevel(
+        logging.DEBUG if level == "DEBUG" else logging.WARNING
+    )

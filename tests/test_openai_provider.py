@@ -1,6 +1,7 @@
 import json
+import time
 
-import httpx
+import httpx2
 import pytest
 
 from porry_agent import openai_provider
@@ -20,11 +21,16 @@ def make_provider(handler, **overrides) -> OpenAIProvider:
     kwargs = dict(model="deepseek-flash", base_url="https://api.deepseek.com/v1",
                   api_key="sk-test", max_output_tokens=1024)
     kwargs.update(overrides)
-    return OpenAIProvider(transport=httpx.MockTransport(handler), **kwargs)
+    return OpenAIProvider(transport=httpx2.MockTransport(handler), **kwargs)
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
 
 
 def test_text_reply_parsed():
-    provider = make_provider(lambda request: httpx.Response(200, json=TEXT_REPLY))
+    provider = make_provider(lambda request: httpx2.Response(200, json=TEXT_REPLY))
     reply = provider.complete([Message(role="user", content="hi")])
     assert reply.role == "assistant"
     assert reply.content == "你好"
@@ -32,7 +38,7 @@ def test_text_reply_parsed():
 
 
 def test_tool_calls_parsed():
-    provider = make_provider(lambda request: httpx.Response(200, json=TOOL_REPLY))
+    provider = make_provider(lambda request: httpx2.Response(200, json=TOOL_REPLY))
     reply = provider.complete([Message(role="user", content="读文件")])
     assert reply.content == ""
     assert len(reply.tool_calls) == 1
@@ -44,11 +50,11 @@ def test_tool_calls_parsed():
 def test_request_shape():
     seen = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen["url"] = str(request.url)
         seen["auth"] = request.headers["Authorization"]
         seen["payload"] = json.loads(request.content)
-        return httpx.Response(200, json=TEXT_REPLY)
+        return httpx2.Response(200, json=TEXT_REPLY)
 
     spec = ToolSpec(name="read_file", description="读", parameters={},
                     handler=lambda args: ToolResult(ok=True, content=""))
@@ -75,55 +81,64 @@ def test_request_shape():
     assert wire[3] == {"role": "tool", "content": "hello", "tool_call_id": "c1"}
 
 
-def test_retry_on_429_then_success(monkeypatch):
-    monkeypatch.setattr(openai_provider, "RETRY_BACKOFF_SECONDS", 0)
+def test_retry_on_429_then_success(no_sleep):
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
         if calls["n"] == 1:
-            return httpx.Response(429, text="rate limited")
-        return httpx.Response(200, json=TEXT_REPLY)
+            return httpx2.Response(429, text="rate limited")
+        return httpx2.Response(200, json=TEXT_REPLY)
 
     reply = make_provider(handler).complete([Message(role="user", content="hi")])
     assert reply.content == "你好"
     assert calls["n"] == 2
 
 
-def test_network_error_retries(monkeypatch):
-    monkeypatch.setattr(openai_provider, "RETRY_BACKOFF_SECONDS", 0)
+def test_network_error_retries(no_sleep):
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise httpx.ConnectError("connection refused")
-        return httpx.Response(200, json=TEXT_REPLY)
+            raise httpx2.ConnectError("connection refused")
+        return httpx2.Response(200, json=TEXT_REPLY)
 
     reply = make_provider(handler).complete([Message(role="user", content="hi")])
     assert reply.content == "你好"
     assert calls["n"] == 2
+
+
+def test_network_error_exhausted(no_sleep):
+    calls = {"n": 0}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls["n"] += 1
+        raise httpx2.ConnectError("connection refused")
+
+    with pytest.raises(ProviderError, match="网络错误"):
+        make_provider(handler).complete([Message(role="user", content="hi")])
+    assert calls["n"] == openai_provider.MAX_RETRIES + 1
 
 
 def test_permanent_error_no_retry():
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
-        return httpx.Response(401, text="invalid key")
+        return httpx2.Response(401, text="invalid key")
 
     with pytest.raises(ProviderError, match="401"):
         make_provider(handler).complete([Message(role="user", content="hi")])
     assert calls["n"] == 1
 
 
-def test_retry_exhausted(monkeypatch):
-    monkeypatch.setattr(openai_provider, "RETRY_BACKOFF_SECONDS", 0)
+def test_retry_exhausted(no_sleep):
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
-        return httpx.Response(503, text="unavailable")
+        return httpx2.Response(503, text="unavailable")
 
     with pytest.raises(ProviderError, match="重试"):
         make_provider(handler).complete([Message(role="user", content="hi")])
@@ -132,7 +147,7 @@ def test_retry_exhausted(monkeypatch):
 
 def test_malformed_response():
     provider = make_provider(
-        lambda request: httpx.Response(200, json={"unexpected": True}))
+        lambda request: httpx2.Response(200, json={"unexpected": True}))
     with pytest.raises(ProviderError, match="格式"):
         provider.complete([Message(role="user", content="hi")])
 
@@ -140,12 +155,12 @@ def test_malformed_response():
 def test_follows_redirect():
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
         if request.url.scheme == "http":
-            return httpx.Response(
+            return httpx2.Response(
                 307, headers={"Location": "https://api.deepseek.com/v1/chat/completions"})
-        return httpx.Response(200, json=TEXT_REPLY)
+        return httpx2.Response(200, json=TEXT_REPLY)
 
     provider = make_provider(handler, base_url="http://api.deepseek.com/v1")
     reply = provider.complete([Message(role="user", content="hi")])
@@ -154,18 +169,18 @@ def test_follows_redirect():
 
 
 def test_context_manager_closes_client():
-    provider = make_provider(lambda request: httpx.Response(200, json=TEXT_REPLY))
+    provider = make_provider(lambda request: httpx2.Response(200, json=TEXT_REPLY))
     with provider as p:
         assert p is provider
         p.complete([Message(role="user", content="hi")])
-    assert provider._client.is_closed
+    assert provider._http_client.is_closed
 
 
 def test_error_message_extracted_from_json():
     body = {"error": {"message": "Invalid API key provided"}}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json=body)
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, json=body)
 
     with pytest.raises(ProviderError, match="Invalid API key provided"):
         make_provider(handler).complete([Message(role="user", content="hi")])
@@ -177,7 +192,7 @@ def test_dict_arguments_normalized():
         "tool_calls": [{"id": "call_1", "type": "function",
                         "function": {"name": "read_file",
                                      "arguments": {"path": "a.txt"}}}]}}]}
-    provider = make_provider(lambda request: httpx.Response(200, json=body))
+    provider = make_provider(lambda request: httpx2.Response(200, json=body))
     reply = provider.complete([Message(role="user", content="读文件")])
     assert reply.tool_calls[0].arguments == '{"path": "a.txt"}'
 
@@ -187,9 +202,9 @@ def test_length_finish_reason_raises():
                          "message": {"role": "assistant", "content": "半句话"}}]}
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
-        return httpx.Response(200, json=body)
+        return httpx2.Response(200, json=body)
 
     with pytest.raises(ProviderError, match="截断"):
         make_provider(handler).complete([Message(role="user", content="hi")])
@@ -199,19 +214,13 @@ def test_length_finish_reason_raises():
 def test_no_max_tokens_when_unset():
     seen = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen["payload"] = json.loads(request.content)
-        return httpx.Response(200, json=TEXT_REPLY)
+        return httpx2.Response(200, json=TEXT_REPLY)
 
     provider = make_provider(handler, max_output_tokens=None)
     provider.complete([Message(role="user", content="hi")])
     assert "max_tokens" not in seen["payload"]
-
-
-def test_invalid_proxy_env_raises_provider_error(monkeypatch):
-    monkeypatch.setenv("NO_PROXY", "[::1]")
-    with pytest.raises(ProviderError, match="NO_PROXY"):
-        OpenAIProvider(model="m", base_url="https://x.com/v1", api_key="sk-test")
 
 
 def _sse_chunk(content=None, tool_calls=None, finish=None):
@@ -224,16 +233,16 @@ def _sse_chunk(content=None, tool_calls=None, finish=None):
 
 
 def _sse_response(chunks):
-    lines = [f"data: {json.dumps(c, ensure_ascii=False)}" for c in chunks]
-    lines.append("data: [DONE]")
-    body = ("\n".join(lines) + "\n").encode("utf-8")
-    return httpx.Response(200, content=iter([body]))
+    events = [f"data: {json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks]
+    events.append("data: [DONE]\n\n")
+    body = "".join(events).encode("utf-8")
+    return httpx2.Response(200, content=iter([body]))
 
 
 def test_stream_content_and_callback():
     seen = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen["payload"] = json.loads(request.content)
         return _sse_response([
             _sse_chunk(content="你"),
@@ -277,12 +286,12 @@ def test_stream_break_after_text_no_retry():
     calls = {"n": 0}
 
     def broken_body():
-        yield 'data: {"choices":[{"delta":{"content":"你"}}]}\n'.encode("utf-8")
-        raise httpx.ReadError("peer closed connection")
+        yield 'data: {"choices":[{"delta":{"content":"你"}}]}\n\n'.encode("utf-8")
+        raise httpx2.ReadError("peer closed connection")
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
-        return httpx.Response(200, content=broken_body())
+        return httpx2.Response(200, content=broken_body())
 
     fragments = []
     with pytest.raises(ProviderError, match="中断"):
@@ -292,14 +301,13 @@ def test_stream_break_after_text_no_retry():
     assert calls["n"] == 1
 
 
-def test_stream_connect_error_retries(monkeypatch):
-    monkeypatch.setattr(openai_provider, "RETRY_BACKOFF_SECONDS", 0)
+def test_stream_connect_error_retries(no_sleep):
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise httpx.ConnectError("connection refused")
+            raise httpx2.ConnectError("connection refused")
         return _sse_response([_sse_chunk(content="你好", finish="stop")])
 
     reply = make_provider(handler).stream_complete(
@@ -310,7 +318,40 @@ def test_stream_connect_error_retries(monkeypatch):
 
 def test_stream_invalid_json_raises():
     provider = make_provider(
-        lambda request: httpx.Response(200, content=iter([b"data: {broken\n"])))
+        lambda request: httpx2.Response(200, content=iter([b"data: {broken\n\n"])))
     with pytest.raises(ProviderError, match="JSON"):
         provider.stream_complete(
             [Message(role="user", content="hi")], on_text=lambda t: None)
+
+
+def test_stream_without_finish_marker_completes():
+    """真实中转形状：finish_reason 全程 null、[DONE] 收尾，应正常完成。"""
+    provider = make_provider(lambda request: _sse_response([
+        _sse_chunk(content="你好")]))
+    reply = provider.stream_complete(
+        [Message(role="user", content="hi")], on_text=lambda t: None)
+    assert reply.content == "你好"
+
+
+def test_stream_empty_choices_skipped():
+    usage_chunk = {"choices": [],
+                   "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                             "total_tokens": 2}}
+    provider = make_provider(lambda request: _sse_response([
+        _sse_chunk(content="你好", finish="stop"), usage_chunk]))
+    reply = provider.stream_complete(
+        [Message(role="user", content="hi")], on_text=lambda t: None)
+    assert reply.content == "你好"
+
+
+def test_stream_permanent_error_no_retry():
+    calls = {"n": 0}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls["n"] += 1
+        return httpx2.Response(401, json={"error": {"message": "bad key"}})
+
+    with pytest.raises(ProviderError, match="401"):
+        make_provider(handler).stream_complete(
+            [Message(role="user", content="hi")], on_text=lambda t: None)
+    assert calls["n"] == 1

@@ -21,7 +21,7 @@ Python 编码风格参考项目内置 python-standards；Agent 设计原则参�
 - 错误采用类型化异常层次，不使用 Union[成功, 错误] 作为返回范式；
 - 面向用户的配置、注册表报错使用 `from None` 精简归因，不为保留异常链牺牲可读性；
 - 模块结构保持扁平，按职责拆分单文件，不引入 services/repositories 分层；
-- 暂不引入 async 改造与 unittest.mock.patch 范式；测试采用三层方案：脚本化假模型 / httpx.MockTransport / 真实 API。
+- 暂不引入 async 改造与 unittest.mock.patch 范式；测试采用三层方案：脚本化假模型 / httpx2.MockTransport / 真实 API。
 
 风格细则：导入分组顺序为标准库 → 第三方包 → 本地模块；布尔标识使用 is/has/can 前缀；多参数函数的可选参数使用 keyword-only；行宽上限 88 字符，暂不引入格式化工具依赖。
 

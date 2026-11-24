@@ -92,9 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"运行失败：{exc}", file=sys.stderr)
         return 1
     finally:
-        close = getattr(provider, "close", None)
-        if close is not None:
-            close()
+        provider.close()
 
     print(f"[done] turns={result.turns} stop={result.stop_reason}")
     print(result.messages[-1].content)

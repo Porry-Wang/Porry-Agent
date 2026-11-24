@@ -39,7 +39,7 @@ def test_prefix_selection_strips_vendor(tmp_path, monkeypatch):
     assert isinstance(provider, OpenAIProvider)
     assert provider._model == "qwen3.8-flash"
     assert str(provider._client.base_url) == "https://api.openlux.ai/v1/"
-    assert provider._client.headers["Authorization"] == "Bearer sk-test"
+    assert provider._client.api_key == "sk-test"
 
 
 def test_default_vendor_for_bare_name(tmp_path, monkeypatch):

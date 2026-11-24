@@ -21,6 +21,8 @@ class Provider(Protocol):
         self, messages: list[Message], *, on_text: Callable[[str], None]
     ) -> Message: ...
 
+    def close(self) -> None: ...
+
 
 class MockProvider:
     """离线确定性回复：回声最近一条用户消息。"""
@@ -38,6 +40,9 @@ class MockProvider:
         reply = self.complete(messages)
         on_text(reply.content)
         return reply
+
+    def close(self) -> None:
+        """不持有资源，关闭为空操作。"""
 
 
 class Vendor(BaseModel):

@@ -385,3 +385,43 @@
 理由：能力可选把分支成本转嫁给每个消费方；接口齐备后消费方只判断「调用方要不要流式」，不再判断「provider 支不支持」。退化实现比探测分支便宜：三行方法让替身成为接口完整公民，业界同款是 LangChain BaseChatModel 的 invoke/stream 双声明加基类默认适配。LoopingProvider 等只走 complete 路径的替身因结构化类型不受影响，不强制补方法。
 
 被否方案：保留 getattr 探测（调用点不可见，本轮反转的对象）；独立 StreamProvider Protocol + isinstance runtime_checkable（仍是运行期判断，且替身被迫类型化）；共享 FakeProvider 基类（核磁盘后仅 RecordingProvider 一处需要，建基类是过度抽象）。
+
+## 2026-11-23 适配器收敛到 openai SDK，删手写协议层与 streaming.py（反转流式纯逻辑层与 NO_PROXY 守卫条款）
+
+背景：手写 httpx 协议层（请求构造、重试循环、SSE 解析、状态码分类）与官方 SDK 能力同构，用户评审判定自维护冗余，自研面应收敛到 Agent 本体。落地前探针实证（openai 3.57.0）：SDK 依赖 httpx2 而非 httpx；重试只覆盖请求建立期（429/5xx/连接错误，max_retries=2 即最多 3 次请求），流迭代期错误不重试、以 APIConnectionError 传播；畸形 200 宽容构造出 choices=None 不抛错；厂商偏差的 dict 型 arguments 原样保留；SSE 按规范分帧（事件间空行分隔）。此前探针「SDK 吞断流」的结论是非规范 SSE 帧（单换行）造成的假象，规范帧重测已更正。
+
+决定：依赖新增 openai>=3.57,<4 与 httpx2>=2.16,<3，移除 httpx。openai_provider.py 重写为 SDK 版：自建 httpx2.Client 注入（timeout、follow_redirects、可注入 MockTransport），base_url 与鉴权头交 SDK 管理；保留 Message 转换、错误翻译、choices 缺失守卫与流式 finish_reason 完整性守卫。删除 streaming.py 与其测试，SSE 分帧与拼装交 SDK。删除 NO_PROXY/InvalidURL 守卫与对应用例。重试语义不变、承担者变：建立期瞬时错误由 SDK 退避重试（指数退避加抖动、尊重 Retry-After），迭代期错误一律不重试直接抛中断错。
+
+理由：协议层的正确性依赖持续跟踪厂商偏差，SDK 的维护面比单个项目宽；删手写层后自研面只剩数据契约（Message 与 wire 互转）和失败语义（翻译与守卫），两者都有真实消费方。自建 http_client 的三目的实证不变：测试注入、close 关自己的 client、错误翻译经 __cause__ 取回根因不被 SDK 包装埋掉。断流双保险：APIConnectionError 接 TCP 级断开，finish_reason 缺失接无错误的干净早停；重试边界由 SDK 的阶段划分天然保证，emitted 标记删除。NO_PROXY 守卫的根因已被上游修复（httpx2 对 [::1] 不再抛 InvalidURL），base_url 现为代码常量无用户输入路径，按保留标准删除。与 11-18「不引入 LiteLLM SDK」不冲突：openai SDK 是目标协议的官方实现，不是多厂商抽象层；该条「适配层从零吃透机制」的学习目标就此修订为收敛到 Agent 本体，协议机制已经手写阶段与探针吃透。
+
+被否方案：继续维护手写协议层（学习价值已兑现，跟踪厂商偏差的维护成本持续存在）；保留 streaming.py 作备用解析路径（无消费方，同一职责两份表示）；引 LiteLLM 替代 openai SDK（11-18 的否决理由仍成立：依赖树 churn、错误被裹进其异常体系）。
+
+## 2026-11-23 流式完整性判据放宽：迭代正常结束即完成（修订 finish_reason 完整性守卫条款）
+
+背景：首次真实压测（#5）即失败。线级证据：openlux 中转全程 finish_reason=null，流以 [DONE] 收尾，工具请求同样；「未见 finish_reason → 抛错」守卫把正常完成的流误判为中断。守卫来自探针假设（规范厂商发 finish_reason），真实中转违反了它。
+
+决定：删除 finish_reason 缺失抛错分支，迭代器正常结束即视为完成；finish_reason=length 截断检查保留（有信号就拦）。对应用例替换为真实中转形状回归用例（finish_reason 全 null + [DONE] 收尾 → 正常返回）。
+
+理由：SDK 迭代器只在两种情况结束——收到 [DONE]，或 HTTP 正文正常终结；真正的提前断连（chunked 正文未收完）httpx2 抛 RemoteProtocolError，走 APIConnectionError 中断路径，既有守卫接住。「干净早停且无 [DONE]」需线级插桩才能分辨，无真实失败案例支撑该成本。披露代价：对不发 finish_reason 的中转，length 截断检测失效；当前请求不带 max_tokens，截断风险低，真撞上按失败清单处理。中转另发 reasoning_content 思考碎片，适配器只输出 content 天然忽略，无需改动。
+
+被否方案：维持严格守卫（误判真实中转，首压测即阻断）；线级插桩区分 [DONE]（无真实失败案例，纯预支）；厂商档案加「是否发 finish_reason」标志（协议偏差数据化可行，当前只有一例偏差样本，等第二例再抽象）。
+
+## 2026-11-23 httpx2 请求日志压到 WARNING，DEBUG 跟随根级别
+
+背景：真实压测中 httpx2 的 INFO 请求日志（HTTP Request: POST ... 200 OK）以 JSON 行进 stderr，与 REPL 流式文本交错。根因：setup_logging 把根日志器设到 INFO，httpx2 请求日志按 INFO 传播到根。
+
+决定：setup_logging 末尾把 httpx2 logger 设为 WARNING；根级别为 DEBUG 时跟随 D![img.png](img.png)EBUG，保留线级诊断逃生门。
+
+理由：逐请求 INFO 对交互用户是传输噪音，失败诊断已由 ProviderError 人话报错承担，WARNING 以上足够。DEBUG 是既有配置旋钮的深诊断语义，不应无条件静音。与 httpx/openai 官方文档推荐钉 WARNING 的配方同款。硬编码 logger 名，换 HTTP 库时需同步。
+
+被否方案：根级别抬到 WARNING（丢自己的 INFO 痕迹）；handler 加按名过滤的 filter（等效但比 setLevel 多一层机制）；不修容忍交错（压测已证实干扰流式阅读）。
+
+## 2026-11-23 close 缝显式化：进 Provider Protocol，删入口 getattr 探测（反转 11-18「Mock 不补空 close」条款）
+
+背景：__main__.py 的 finally 经 getattr(provider, "close", None) 探测关闭，与流式批反转前的 getattr 探测同款缺陷：调用点不可搜索，「要不要关」从接口期降级到运行期。11-18 决策曾以「MockProvider 不持有资源，不为接口对称补空方法」拒绝补空 close。
+
+决定：Provider Protocol 声明 close()；MockProvider 补空实现（不持有资源，关闭为空操作）；__main__.py 的 finally 直调 provider.close()。新增用例钉住一次性模式结束必关。
+
+理由：延续流式显式化批确立的原则——退化实现比探测分支便宜，接口齐备后消费方不再判断能力有无。close 与 stream_complete 同为 Provider 生命周期/能力契约，收法一致；只走 complete 路径的测试替身因结构化类型不受影响。11-18 条款的担忧（空方法噪音）被三行成本与可搜索性收益压倒。
+
+被否方案：保留 getattr 探测（调用点不可见，本轮反转对象）；入口改用 with provider（Mock 需再补 __enter__/__exit__ 两个方法，比补一个 close 贵）；维持 11-18 条款不收（同一缺陷在流式缝已被判定不可接受，close 缝没有理由例外）。
