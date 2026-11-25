@@ -3,6 +3,8 @@ import time
 
 import httpx2
 import pytest
+from openai import APIError
+from openai.types.chat import ChatCompletionChunk
 
 from porry_agent import openai_provider
 from porry_agent.messages import Message, ToolCall
@@ -131,6 +133,18 @@ def test_permanent_error_no_retry():
     with pytest.raises(ProviderError, match="401"):
         make_provider(handler).complete([Message(role="user", content="hi")])
     assert calls["n"] == 1
+
+
+def test_complete_api_error_translated(monkeypatch):
+    provider = make_provider(lambda request: httpx2.Response(200, json=TEXT_REPLY))
+    request = httpx2.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+
+    def fail(**kwargs):
+        raise APIError("service unavailable", request, body=None)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fail)
+    with pytest.raises(ProviderError, match="模型服务错误"):
+        provider.complete([Message(role="user", content="hi")])
 
 
 def test_retry_exhausted(no_sleep):
@@ -296,6 +310,51 @@ def test_stream_break_after_text_no_retry():
     fragments = []
     with pytest.raises(ProviderError, match="中断"):
         make_provider(handler).stream_complete(
+            [Message(role="user", content="hi")], on_text=fragments.append)
+    assert fragments == ["你"]
+    assert calls["n"] == 1
+
+
+def test_stream_create_api_error_translated(monkeypatch):
+    provider = make_provider(lambda request: httpx2.Response(200, json=TEXT_REPLY))
+    request = httpx2.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+
+    def fail(**kwargs):
+        raise APIError("service unavailable", request, body=None)
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fail)
+    with pytest.raises(ProviderError, match="模型服务错误"):
+        provider.stream_complete(
+            [Message(role="user", content="hi")], on_text=lambda text: None)
+
+
+def test_stream_iteration_api_error_translated(monkeypatch):
+    provider = make_provider(lambda request: httpx2.Response(200, json=TEXT_REPLY))
+    request = httpx2.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+    calls = {"n": 0}
+
+    def broken_stream():
+        yield ChatCompletionChunk(
+            id="chunk-1",
+            choices=[{
+                "index": 0,
+                "delta": {"content": "你"},
+                "finish_reason": None,
+            }],
+            created=0,
+            model="test-model",
+            object="chat.completion.chunk",
+        )
+        raise APIError("service unavailable", request, body=None)
+
+    def create(**kwargs):
+        calls["n"] += 1
+        return broken_stream()
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", create)
+    fragments = []
+    with pytest.raises(ProviderError, match="流式回复中断"):
+        provider.stream_complete(
             [Message(role="user", content="hi")], on_text=fragments.append)
     assert fragments == ["你"]
     assert calls["n"] == 1

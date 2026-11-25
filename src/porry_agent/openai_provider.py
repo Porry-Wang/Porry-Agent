@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 
 import httpx2
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import APIConnectionError, APIError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletion
 
 from porry_agent.messages import Message, ToolCall
@@ -157,6 +157,8 @@ class OpenAIProvider:
             raise ProviderError(
                 f"网络错误（已重试 {MAX_RETRIES} 次）：{exc.__cause__ or exc}"
             ) from None
+        except APIError as exc:
+            raise ProviderError(f"模型服务错误：{exc}") from None
         return _parse_reply(completion)
 
     def stream_complete(
@@ -176,6 +178,8 @@ class OpenAIProvider:
             raise ProviderError(
                 f"网络错误（已重试 {MAX_RETRIES} 次）：{exc.__cause__ or exc}"
             ) from None
+        except APIError as exc:
+            raise ProviderError(f"模型服务错误：{exc}") from None
 
         content_parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
@@ -208,6 +212,10 @@ class OpenAIProvider:
             raise ProviderError(
                 f"流式回复中断：{exc.__cause__ or exc}。"
                 f"已输出内容无法续传，请重发本轮。"
+            ) from None
+        except APIError as exc:
+            raise ProviderError(
+                f"流式回复中断：{exc}。已输出内容无法续传，请重发本轮。"
             ) from None
         except json.JSONDecodeError:
             raise ProviderError("流式数据不是合法 JSON，无法解析。") from None
