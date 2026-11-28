@@ -65,6 +65,46 @@ def test_begin_transaction_writes_prepared_manifest_and_backup(tmp_path):
     assert (directory / "backups" / "0.bak").read_bytes() == b"old\n"
 
 
+@pytest.mark.parametrize("failure_name", ["0.bak", "manifest.json"])
+def test_begin_transaction_failure_cleans_partial_directory(
+    tmp_path, monkeypatch, failure_name
+):
+    real_write = journal.atomic_write_bytes
+
+    def fail_write(path, data, *, mode=None):
+        if path.name == failure_name:
+            raise OSError("injected write failure")
+        return real_write(path, data, mode=mode)
+
+    monkeypatch.setattr(journal, "atomic_write_bytes", fail_write)
+
+    with pytest.raises(OSError, match="injected write failure"):
+        begin_update(tmp_path)
+
+    transactions = tmp_path / journal.TRANSACTION_DIRECTORY
+    assert not transactions.exists() or not any(transactions.iterdir())
+
+
+def test_begin_transaction_cleanup_failure_preserves_original_error(
+    tmp_path, monkeypatch
+):
+    real_write = journal.atomic_write_bytes
+
+    def fail_write(path, data, *, mode=None):
+        if path.name == "0.bak":
+            raise OSError("original write failure")
+        return real_write(path, data, mode=mode)
+
+    def fail_cleanup(*args, **kwargs):
+        raise OSError("cleanup failure")
+
+    monkeypatch.setattr(journal, "atomic_write_bytes", fail_write)
+    monkeypatch.setattr(journal.shutil, "rmtree", fail_cleanup)
+
+    with pytest.raises(OSError, match="original write failure"):
+        begin_update(tmp_path)
+
+
 def test_mark_state_persists_transition(tmp_path):
     transaction_id = begin_update(tmp_path)
 
@@ -263,6 +303,103 @@ def test_corrupt_entry_shape_is_reported_not_raised(tmp_path, entries):
     assert (tmp_path / "file.py").read_bytes() == b"old\n"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state", []),
+        ("state", {}),
+        ("kind", []),
+        ("kind", {}),
+    ],
+)
+def test_unhashable_manifest_values_are_reported_not_raised(
+    tmp_path, field, value
+):
+    transaction_id = begin_update(tmp_path)
+    journal.mark_state(tmp_path, transaction_id, "applying")
+    path = tmp_path / journal.TRANSACTION_DIRECTORY / transaction_id / "manifest.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if field == "state":
+        data["state"] = value
+    else:
+        data["entries"][0]["kind"] = value
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    report = journal.recover_journal(tmp_path)
+
+    assert report.errors
+    assert report.blocked is True
+    assert path.exists()
+    assert (tmp_path / "file.py").read_bytes() == b"old\n"
+
+
+def test_deeply_nested_manifest_is_reported_not_raised(tmp_path):
+    transaction_id = begin_update(tmp_path)
+    path = tmp_path / journal.TRANSACTION_DIRECTORY / transaction_id / "manifest.json"
+    path.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+
+    report = journal.recover_journal(tmp_path)
+
+    assert report.errors
+    assert report.blocked is True
+    assert path.exists()
+
+
+@pytest.mark.parametrize(
+    "backup_kind",
+    ["absolute", "relative", "nested"],
+)
+def test_recover_rejects_backup_path_escape(tmp_path, backup_kind):
+    transaction_id = begin_update(tmp_path)
+    journal.mark_state(tmp_path, transaction_id, "applying")
+    target = tmp_path / "file.py"
+    target.write_bytes(b"new\n")
+    outside = tmp_path / "outside-secret"
+    outside.write_bytes(b"outside-secret\n")
+    directory = tmp_path / journal.TRANSACTION_DIRECTORY / transaction_id
+    path = directory / "manifest.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if backup_kind == "absolute":
+        data["entries"][0]["backup_name"] = str(outside)
+    elif backup_kind == "relative":
+        data["entries"][0]["backup_name"] = os.path.relpath(
+            outside, directory / "backups"
+        )
+    else:
+        data["entries"][0]["backup_name"] = "nested/0.bak"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    report = journal.recover_journal(tmp_path)
+
+    assert report.errors
+    assert report.blocked is True
+    assert target.read_bytes() == b"new\n"
+    assert outside.read_bytes() == b"outside-secret\n"
+    assert path.exists()
+
+
+def test_recover_rejects_symlink_backup(tmp_path):
+    transaction_id = begin_update(tmp_path)
+    journal.mark_state(tmp_path, transaction_id, "applying")
+    target = tmp_path / "file.py"
+    target.write_bytes(b"new\n")
+    outside = tmp_path / "outside-secret"
+    outside.write_bytes(b"outside-secret\n")
+    directory = tmp_path / journal.TRANSACTION_DIRECTORY / transaction_id
+    backup = directory / "backups" / "0.bak"
+    backup.unlink()
+    try:
+        backup.symlink_to(outside)
+    except OSError:
+        pytest.skip("当前平台或权限不支持创建符号链接")
+
+    report = journal.recover_journal(tmp_path)
+
+    assert report.needs_attention == (transaction_id,)
+    assert target.read_bytes() == b"new\n"
+    assert outside.read_bytes() == b"outside-secret\n"
+
+
 def test_begin_transaction_rejects_path_escape(tmp_path):
     with pytest.raises(journal.JournalError) as exc_info:
         journal.begin_transaction(
@@ -271,6 +408,32 @@ def test_begin_transaction_rejects_path_escape(tmp_path):
         )
 
     assert exc_info.value.error_type == "invalid_args"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".porry_agent",
+        ".porry_agent/journal",
+        ".porry_agent/journal/transactions",
+    ],
+)
+def test_journal_rejects_symlinked_state_directory(
+    tmp_path, tmp_path_factory, relative
+):
+    outside = tmp_path_factory.mktemp("journal-outside")
+    link = tmp_path / relative
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("当前平台或权限不支持创建符号链接")
+
+    with pytest.raises(journal.JournalError) as exc_info:
+        journal.recover_journal(tmp_path)
+
+    assert exc_info.value.error_type == "journal_corrupt"
+    assert not any(outside.iterdir())
 
 
 def test_atomic_write_bytes_preserves_mode(tmp_path, assert_mode):
@@ -282,6 +445,45 @@ def test_atomic_write_bytes_preserves_mode(tmp_path, assert_mode):
 
     assert path.read_bytes() == b"new\n"
     assert_mode(path, 0o755)
+
+
+def test_atomic_write_succeeds_when_directory_fsync_fails(
+    tmp_path, monkeypatch, caplog
+):
+    path = tmp_path / "file.py"
+    path.write_bytes(b"old\n")
+    real_fsync = os.fsync
+
+    def fail_directory_fsync(descriptor):
+        if journal.stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("directory fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_directory_fsync)
+
+    journal.atomic_write_bytes(path, b"new\n")
+
+    assert path.read_bytes() == b"new\n"
+    assert "目录同步失败" in caplog.text
+
+
+def test_atomic_write_file_fsync_failure_keeps_old_file(tmp_path, monkeypatch):
+    path = tmp_path / "file.py"
+    path.write_bytes(b"old\n")
+    real_fsync = os.fsync
+
+    def fail_file_fsync(descriptor):
+        if not journal.stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("file fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_file_fsync)
+
+    with pytest.raises(OSError, match="file fsync failed"):
+        journal.atomic_write_bytes(path, b"new\n")
+
+    assert path.read_bytes() == b"old\n"
+    assert not list(tmp_path.glob(".porry-tmp-*"))
 
 
 def test_recover_multiple_transactions(tmp_path):

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal, Sequence
@@ -19,11 +21,14 @@ if os.name == "posix":
 elif os.name == "nt":
     import msvcrt
 
+logger = logging.getLogger(__name__)
+
 JOURNAL_DIRECTORY = Path(".porry_agent") / "journal"
 TRANSACTION_DIRECTORY = JOURNAL_DIRECTORY / "transactions"
 LOCK_FILENAME = "journal.lock"
 MANIFEST_FILENAME = "manifest.json"
 JOURNAL_VERSION = 1
+BACKUP_NAME_PATTERN = re.compile(r"[0-9]+\.bak")
 
 JournalState = Literal["prepared", "applying", "committed", "needs_attention"]
 JournalKind = Literal["update", "add", "delete"]
@@ -64,19 +69,50 @@ class RecoveryReport:
         return bool(self.needs_attention or self.errors)
 
 
+def _ensure_journal_location(root: Path) -> Path:
+    """规范化工作区并拒绝符号链接状态目录，防止 Journal 逃逸工作区。"""
+    try:
+        resolved_root = root.resolve()
+        current = resolved_root
+        for part in TRANSACTION_DIRECTORY.parts:
+            current = current / part
+            if current.is_symlink():
+                raise JournalError(
+                    "journal_corrupt",
+                    f"Journal 状态目录不能是符号链接：{current}",
+                )
+        state_root = resolved_root / TRANSACTION_DIRECTORY
+        if not state_root.resolve().is_relative_to(resolved_root):
+            raise JournalError(
+                "journal_corrupt", "Journal 状态目录解析后越出工作区。"
+            )
+    except (OSError, RuntimeError) as exc:
+        raise JournalError(
+            "journal_corrupt", f"无法解析 Journal 状态目录：{exc}"
+        ) from exc
+    return resolved_root
+
+
 def fsync_directory(path: Path) -> None:
-    """同步目录元数据；Windows 不支持目录 fsync 时跳过。"""
+    """尽力同步目录元数据；失败只记录，不改变已完成文件操作的结果。"""
     if os.name == "nt":
         return
-    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError as exc:
+        logger.warning("无法打开目录进行同步 %s：%s", path, exc)
+        return
     try:
         os.fsync(descriptor)
+    except OSError as exc:
+        logger.warning("目录同步失败 %s：%s", path, exc)
     finally:
-        os.close(descriptor)
+        with suppress(OSError):
+            os.close(descriptor)
 
 
 def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
-    """原子写入字节，保留或指定权限，并同步文件和父目录。"""
+    """原子替换字节并同步文件内容；目录同步为尽力而为。"""
     existing_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
     effective_mode = mode if mode is not None else existing_mode
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".porry-tmp-")
@@ -84,13 +120,16 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> N
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
             stream.flush()
+            if effective_mode is not None and os.name != "nt":
+                os.fchmod(stream.fileno(), effective_mode)
             os.fsync(stream.fileno())
-        if effective_mode is not None:
+        if effective_mode is not None and os.name == "nt":
             os.chmod(temporary, effective_mode)
         os.replace(temporary, path)
         fsync_directory(path.parent)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        with suppress(OSError):
+            Path(temporary).unlink(missing_ok=True)
         raise
 
 
@@ -124,6 +163,7 @@ def _unlock_descriptor(descriptor: int) -> None:
 @contextmanager
 def journal_lock(root: Path) -> Iterator[None]:
     """持有工作区事务锁；进程崩溃后操作系统会释放锁。"""
+    root = _ensure_journal_location(root)
     base = root / JOURNAL_DIRECTORY
     base.mkdir(parents=True, exist_ok=True)
     lock_path = base / LOCK_FILENAME
@@ -162,16 +202,26 @@ def _validate_manifest_entry(entry: object, transaction_id: str) -> None:
     invalid = JournalError("journal_corrupt", f"事务日志条目非法：{transaction_id}")
     if not isinstance(entry, dict):
         raise invalid
-    if not isinstance(entry.get("path"), str) or entry.get("kind") not in {
-        "update",
-        "add",
-        "delete",
-    }:
+    kind = entry.get("kind")
+    if (
+        not isinstance(entry.get("path"), str)
+        or not isinstance(kind, str)
+        or kind not in {
+            "update",
+            "add",
+            "delete",
+        }
+    ):
         raise invalid
-    for field in ("backup_name", "new_sha256"):
-        value = entry.get(field)
-        if value is not None and not isinstance(value, str):
-            raise invalid
+    backup_name = entry.get("backup_name")
+    if backup_name is not None and (
+        not isinstance(backup_name, str)
+        or BACKUP_NAME_PATTERN.fullmatch(backup_name) is None
+    ):
+        raise invalid
+    new_sha256 = entry.get("new_sha256")
+    if new_sha256 is not None and not isinstance(new_sha256, str):
+        raise invalid
     for field in ("mode", "new_mode"):
         value = entry.get(field)
         if value is not None and (
@@ -184,13 +234,19 @@ def _read_manifest(root: Path, transaction_id: str) -> dict:
     path = _manifest_path(root, transaction_id)
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as exc:
         raise JournalError(
             "journal_corrupt", f"无法读取事务日志 {transaction_id}：{exc}"
         ) from exc
     if not isinstance(manifest, dict) or manifest.get("version") != JOURNAL_VERSION:
         raise JournalError("journal_corrupt", f"事务日志版本非法：{transaction_id}")
-    if manifest.get("state") not in {
+    state = manifest.get("state")
+    if not isinstance(state, str) or state not in {
         "prepared",
         "applying",
         "committed",
@@ -230,6 +286,7 @@ def _validate_file(file: JournalFile) -> None:
 
 def begin_transaction(root: Path, files: Sequence[JournalFile]) -> str:
     """写入持久备份和 prepared 清单；调用方应持有事务锁。"""
+    root = _ensure_journal_location(root)
     for file in files:
         _validate_file(file)
     transaction_id = uuid.uuid4().hex
@@ -237,48 +294,56 @@ def begin_transaction(root: Path, files: Sequence[JournalFile]) -> str:
     transactions.mkdir(parents=True, exist_ok=True)
     directory = _transaction_directory(root, transaction_id)
     directory.mkdir()
-    fsync_directory(transactions)
-    backups = directory / "backups"
-    backups.mkdir()
-    entries: list[dict] = []
-    for index, file in enumerate(files):
-        backup_name = None
-        if file.old is not None:
-            backup_name = f"{index}.bak"
-            atomic_write_bytes(backups / backup_name, file.old, mode=0o600)
-        entries.append(
-            {
-                "path": file.path,
-                "kind": file.kind,
-                "existed": file.old is not None,
-                "mode": file.mode,
-                "new_sha256": (
-                    hashlib.sha256(file.new).hexdigest()
-                    if file.new is not None
-                    else None
-                ),
-                "new_mode": file.new_mode,
-                "backup_name": backup_name,
-            }
-        )
-    manifest = {
-        "version": JOURNAL_VERSION,
-        "state": "prepared",
-        "entries": entries,
-    }
-    _write_manifest(root, transaction_id, manifest)
-    fsync_directory(backups)
-    fsync_directory(directory)
-    return transaction_id
+    try:
+        fsync_directory(transactions)
+        backups = directory / "backups"
+        backups.mkdir()
+        entries: list[dict] = []
+        for index, file in enumerate(files):
+            backup_name = None
+            if file.old is not None:
+                backup_name = f"{index}.bak"
+                atomic_write_bytes(backups / backup_name, file.old, mode=0o600)
+            entries.append(
+                {
+                    "path": file.path,
+                    "kind": file.kind,
+                    "existed": file.old is not None,
+                    "mode": file.mode,
+                    "new_sha256": (
+                        hashlib.sha256(file.new).hexdigest()
+                        if file.new is not None
+                        else None
+                    ),
+                    "new_mode": file.new_mode,
+                    "backup_name": backup_name,
+                }
+            )
+        manifest = {
+            "version": JOURNAL_VERSION,
+            "state": "prepared",
+            "entries": entries,
+        }
+        _write_manifest(root, transaction_id, manifest)
+        fsync_directory(backups)
+        fsync_directory(directory)
+        return transaction_id
+    except BaseException:
+        with suppress(OSError):
+            shutil.rmtree(directory)
+            fsync_directory(transactions)
+        raise
 
 
 def mark_state(root: Path, transaction_id: str, state: JournalState) -> None:
+    root = _ensure_journal_location(root)
     manifest = _read_manifest(root, transaction_id)
     manifest["state"] = state
     _write_manifest(root, transaction_id, manifest)
 
 
 def cleanup_transaction(root: Path, transaction_id: str) -> None:
+    root = _ensure_journal_location(root)
     directory = _transaction_directory(root, transaction_id)
     if not directory.exists():
         return
@@ -290,7 +355,29 @@ def _backup_bytes(directory: Path, entry: dict) -> bytes | None:
     backup_name = entry.get("backup_name")
     if backup_name is None:
         return None
-    return (directory / "backups" / backup_name).read_bytes()
+
+    transaction_root = directory.resolve()
+    backups_root = transaction_root / "backups"
+    backup_path = backups_root / backup_name
+    try:
+        resolved_backups = backups_root.resolve(strict=True)
+    except OSError as exc:
+        raise JournalError(
+            "journal_corrupt", f"无法解析事务备份目录：{directory}"
+        ) from exc
+    if resolved_backups != backups_root:
+        raise JournalError("journal_corrupt", "事务备份目录非法。")
+    if backup_path.is_symlink():
+        raise JournalError("journal_corrupt", f"事务备份不能是符号链接：{backup_name}")
+    try:
+        resolved_backup = backup_path.resolve(strict=True)
+    except OSError as exc:
+        raise JournalError(
+            "journal_corrupt", f"无法解析事务备份：{backup_name}"
+        ) from exc
+    if resolved_backup.parent != resolved_backups or not resolved_backup.is_file():
+        raise JournalError("journal_corrupt", f"事务备份路径非法：{backup_name}")
+    return resolved_backup.read_bytes()
 
 
 def _rollback_entry(root: Path, directory: Path, entry: dict) -> bool:
@@ -353,6 +440,7 @@ def _rollback_transaction_unlocked(root: Path, transaction_id: str) -> str:
 
 def recover_journal_unlocked(root: Path) -> RecoveryReport:
     """恢复所有遗留事务；调用方应持有事务锁。"""
+    root = _ensure_journal_location(root)
     transactions = root / TRANSACTION_DIRECTORY
     if not transactions.exists():
         return RecoveryReport()
